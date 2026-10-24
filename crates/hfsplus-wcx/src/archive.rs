@@ -1,5 +1,6 @@
-//! Platform-neutral plugin core: opens volumes, walks them lazily one header at
-//! a time (what `ReadHeaderExW` needs) and extracts files (`ProcessFileW`).
+//! Platform-neutral plugin core: opens volumes (HFS+/HFSX and APFS), walks them
+//! lazily one header at a time (what `ReadHeaderExW` needs) and extracts files
+//! (`ProcessFileW`).
 
 use std::collections::VecDeque;
 use std::fs::{self, File};
@@ -7,18 +8,16 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use hfsplus::{DirEntry, EntryKind, HfsPlusError, HfsVolume};
-
 use crate::detect::{self, LocateError};
 use crate::ffi::{self, ProcessDataProcW};
-use crate::source::Slice;
 use crate::util;
+use crate::volume::{self, MacVolume, Node, NodeKind, VolumeError};
 
 /// One item reported to Total Commander.
 #[derive(Debug, Clone)]
 pub struct Entry {
     vol: usize,
-    /// Path inside the HFS+ volume (`/` separated, raw on-disk names).
+    /// Path inside the volume (`/` separated, raw on-disk names).
     hfs_path: String,
     /// Path shown to Total Commander (`\` separated, Windows-safe names).
     pub disp: String,
@@ -40,10 +39,10 @@ pub enum OpenError {
     Io(io::Error),
     /// `.hfsdev` file is malformed.
     Config(String),
-    /// Nothing that looks like HFS+/HFSX was found.
+    /// Nothing that looks like HFS+/HFSX or APFS was found.
     NoVolume,
     /// A volume was found but could not be parsed.
-    Hfs(HfsPlusError),
+    Fs(VolumeError),
 }
 
 impl OpenError {
@@ -52,8 +51,8 @@ impl OpenError {
             OpenError::Io(_) => ffi::E_EOPEN,
             OpenError::Config(_) => ffi::E_BAD_ARCHIVE,
             OpenError::NoVolume => ffi::E_UNKNOWN_FORMAT,
-            OpenError::Hfs(HfsPlusError::Io(_)) => ffi::E_EREAD,
-            OpenError::Hfs(_) => ffi::E_BAD_ARCHIVE,
+            OpenError::Fs(e) if e.is_io() => ffi::E_EREAD,
+            OpenError::Fs(_) => ffi::E_BAD_ARCHIVE,
         }
     }
 }
@@ -61,7 +60,9 @@ impl OpenError {
 pub struct Archive {
     /// Name of the opened source, copied into every header.
     pub arc_name: String,
-    vols: Vec<HfsVolume<Slice>>,
+    vols: Vec<MacVolume>,
+    /// Display path of every volume's root (`""` for the single-volume case).
+    roots: Vec<String>,
     work: Vec<Job>,
     pending: VecDeque<Entry>,
     current: Option<Entry>,
@@ -82,37 +83,21 @@ impl Archive {
         }
         let src = Arc::new(Mutex::new(src));
 
-        let mut vols = Vec::new();
-        let mut labels = Vec::new();
-        let mut first_err = None;
-        for (i, p) in parts.iter().enumerate() {
-            match HfsVolume::open(Slice::new(src.clone(), p.start, p.len)) {
-                Ok(v) => {
-                    vols.push(v);
-                    labels.push(if p.label.is_empty() {
-                        format!("Partition {}", i + 1)
-                    } else {
-                        format!("Partition {} - {}", i + 1, p.label)
-                    });
-                }
-                Err(e) => {
-                    first_err.get_or_insert(e);
-                }
-            }
-        }
-        if vols.is_empty() {
-            return Err(OpenError::Hfs(first_err.expect("at least one volume was tried")));
-        }
+        let opened = volume::open_all(&src, &parts).map_err(OpenError::Fs)?;
+        let (labels, vols): (Vec<String>, Vec<MacVolume>) = opened.into_iter().map(|o| (o.label, o.vol)).unzip();
 
         let mut work = Vec::new();
         let mut pending = VecDeque::new();
+        let mut roots = Vec::new();
         if vols.len() == 1 {
             work.push(Job { vol: 0, hfs_path: "/".into(), disp: String::new() });
+            roots.push(String::new());
         } else {
             // Several volumes: one top-level folder per volume.
             let mut names = util::NameSet::default();
             for (i, label) in labels.iter().enumerate() {
                 let disp = names.unique(util::sanitize_component(label));
+                roots.push(disp.clone());
                 pending.push_back(Entry { vol: i, hfs_path: "/".into(), disp, is_dir: true, size: 0, mtime: None });
             }
         }
@@ -120,6 +105,7 @@ impl Archive {
         Ok(Archive {
             arc_name: path.to_string_lossy().into_owned(),
             vols,
+            roots,
             work,
             pending,
             current: None,
@@ -131,7 +117,7 @@ impl Archive {
 
     /// Next item of the walk, `Ok(None)` at the end. Directories are reported
     /// before their contents.
-    pub fn next_header(&mut self) -> Result<Option<Entry>, HfsPlusError> {
+    pub fn next_header(&mut self) -> Result<Option<Entry>, VolumeError> {
         loop {
             if let Some(e) = self.pending.pop_front() {
                 if e.is_dir {
@@ -141,6 +127,10 @@ impl Archive {
                 return Ok(Some(e));
             }
             let Some(job) = self.work.pop() else {
+                // Whole tree walked: APFS volumes that turned out to hold clones get their notice file now.
+                if self.enqueue_late_notices() {
+                    continue;
+                }
                 self.current = None;
                 return Ok(None);
             };
@@ -157,12 +147,33 @@ impl Archive {
         }
     }
 
-    fn enqueue(&mut self, job: &Job, mut list: Vec<DirEntry>) {
+    /// Queue the virtual "clones" notice of every volume that has seen a cloned file.
+    fn enqueue_late_notices(&mut self) -> bool {
+        let mut any = false;
+        for (i, v) in self.vols.iter_mut().enumerate() {
+            if let Some(n) = v.late_clone_notice() {
+                let shown = util::sanitize_component(&n.name);
+                let root = &self.roots[i];
+                self.pending.push_back(Entry {
+                    vol: i,
+                    hfs_path: format!("/{}", n.name),
+                    disp: if root.is_empty() { shown } else { format!("{root}\\{shown}") },
+                    is_dir: false,
+                    size: n.size,
+                    mtime: None,
+                });
+                any = true;
+            }
+        }
+        any
+    }
+
+    fn enqueue(&mut self, job: &Job, mut list: Vec<Node>) {
         list.sort_by_cached_key(|d| d.name.to_lowercase());
         let mut names = util::NameSet::default();
         for d in list {
             let shown = names.unique(util::sanitize_component(&d.name));
-            let is_dir = d.kind == EntryKind::Directory;
+            let is_dir = d.kind == NodeKind::Dir;
             self.pending.push_back(Entry {
                 vol: job.vol,
                 hfs_path: if job.hfs_path == "/" {
@@ -173,7 +184,7 @@ impl Archive {
                 disp: if job.disp.is_empty() { shown } else { format!("{}\\{}", job.disp, shown) },
                 is_dir,
                 size: if is_dir { 0 } else { d.size },
-                mtime: util::hfs_to_unix(d.modify_date),
+                mtime: d.mtime,
             });
         }
     }
@@ -226,7 +237,7 @@ impl Archive {
             Ok(_) => ffi::E_OK,
             Err(_) if sink.aborted => ffi::E_EABORTED,
             Err(_) if sink.write_failed => ffi::E_EWRITE,
-            Err(HfsPlusError::Io(_)) => ffi::E_EREAD,
+            Err(e) if e.is_io() => ffi::E_EREAD,
             Err(_) => ffi::E_BAD_DATA,
         };
         drop(sink);

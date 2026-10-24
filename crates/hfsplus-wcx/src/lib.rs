@@ -1,4 +1,4 @@
-//! Total Commander WCX (packer) plugin for read-only access to HFS+/HFSX volumes.
+//! Total Commander WCX (packer) plugin for read-only access to HFS+/HFSX volumes and APFS containers.
 //!
 //! Built as a 64-bit DLL and renamed to `*.wcx64`. Only the Unicode (`...W`)
 //! entry points are implemented; the ANSI ones exist solely so Total Commander
@@ -9,7 +9,7 @@ pub mod archive;
 pub mod ffi;
 
 // sdílené moduly z macfs-core (zpřístupněné pod původními cestami)
-pub use macfs_core::{detect, source, util};
+pub use macfs_core::{detect, source, util, volume};
 
 use std::ffi::{c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};

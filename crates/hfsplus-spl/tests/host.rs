@@ -13,6 +13,7 @@ use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use apfs::testutil::ApfsImageBuilder;
 use hfsplus::testutil::HfsPlusImageBuilder;
 use hfsplus_spl::spl::*;
 use hfsplus_spl::win::{Answer, set_answer, take_messages};
@@ -442,7 +443,7 @@ fn entry_points_and_connect() {
         let obj = unsafe { SalamanderPluginEntry(&mut *e as *mut MockEntry as *mut Entry) };
         assert!(!obj.is_null());
         assert_eq!(e.functions, FUNCTION_PANELARCHIVERVIEW);
-        assert_eq!(e.extensions, "hfs;hfsdev");
+        assert_eq!(e.extensions, "hfs;apfs;hfsdev;apfsdev");
         assert!(e.fs_name_null);
         assert!(e.name.contains("HFS+"));
 
@@ -450,7 +451,7 @@ fn entry_points_and_connect() {
             let pvt = &*(*(obj as *mut Obj<PluginVtbl>)).vtbl;
             let mut conn = MockConnect { vtbl: &CONNECT_VTBL, calls: vec![] };
             (pvt.Connect)(obj, null_mut(), &mut conn as *mut MockConnect as *mut Connect);
-            assert_eq!(conn.calls, vec![("hfs;hfsdev".to_string(), FALSE, FALSE)]);
+            assert_eq!(conn.calls, vec![("hfs;apfs;hfsdev;apfsdev".to_string(), FALSE, FALSE)]);
             assert_eq!(
                 (pvt.GetInterfaceForArchiver)(obj),
                 &hfsplus_spl::plugin::ARCHIVER_OBJ as *const Obj<ArchiverVtbl> as *mut c_void
@@ -651,5 +652,126 @@ fn overwrite_question_is_asked_once_and_honoured() {
         fs::remove_dir_all(&out).unwrap();
     }
     set_answer(Answer::Yes);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// APFS (synthetic containers from `apfs::testutil`)
+// ---------------------------------------------------------------------------
+
+fn apfs_multi() -> Vec<u8> {
+    let mut b = ApfsImageBuilder::new();
+    b.volume("Macintosh HD").add_file("hello.txt", b"system");
+    b.volume("Macintosh HD - Data")
+        .snapshots(2)
+        .add_dir("docs")
+        .add_file("docs/note.txt", b"a note")
+        .add_file("orig.bin", &vec![7u8; 5_000])
+        .add_clone("copy.bin", "orig.bin");
+    b.volume("Vault").encrypted().add_file("secret.txt", b"cipher");
+    b.build()
+}
+
+#[test]
+fn apfs_listing_reports_unsupported_features() {
+    let dir = temp_dir();
+    let img = dir.join("mac.apfs");
+    fs::write(&img, apfs_multi()).unwrap();
+
+    let (r, d) = list(&img);
+    assert_eq!(r, TRUE);
+    let kinds: Vec<(bool, &str, &str)> = d.adds.iter().map(|a| (a.is_dir, a.parent.as_str(), a.name.as_str())).collect();
+    let data = "Partition 1 - Macintosh HD - Data";
+    for want in [
+        (true, "", "Partition 1 - Macintosh HD"),
+        (false, "Partition 1 - Macintosh HD", "hello.txt"),
+        (true, "", data),
+        (true, data, "docs"),
+        (false, data, "orig.bin"),
+        (false, data, "copy.bin"),
+        (false, data, "!APFS-NOTICE.txt"), // snapshots
+        (false, data, "!APFS-CLONES.txt"), // clones
+        (false, "Partition 1 - Vault", "!APFS-NOTICE.txt"), // encrypted
+    ] {
+        assert!(kinds.contains(&want), "{want:?} missing in {kinds:?}");
+    }
+    assert!(!kinds.iter().any(|k| k.2 == "secret.txt"), "encrypted files must not be listed: {kinds:?}");
+    assert_eq!(kinds.iter().filter(|k| k.1 == "Partition 1 - Vault").count(), 1);
+    assert!(!kinds.iter().any(|k| k.1 == "Partition 1 - Macintosh HD" && k.2.starts_with('!')), "clean volume has no notice");
+    // directories are announced before their content, and the sizes of the notices are the real ones
+    let dir_pos = kinds.iter().position(|k| *k == (true, data, "docs")).unwrap();
+    let file_pos = kinds.iter().position(|k| *k == (false, "Partition 1 - Macintosh HD - Data\\docs", "note.txt")).unwrap();
+    assert!(dir_pos < file_pos);
+    assert!(d.find("!APFS-NOTICE.txt").size > 0 && d.find("!APFS-CLONES.txt").size > 0);
+    assert_eq!(d.find("copy.bin").size, 5_000);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn apfs_unpack_including_the_notice_files() {
+    let dir = temp_dir();
+    let img = dir.join("mac.apfs");
+    fs::write(&img, apfs_multi()).unwrap();
+    let (_, d) = list(&img);
+    let notice = d.adds.iter().find(|a| a.name == "!APFS-NOTICE.txt" && a.parent == "Partition 1 - Macintosh HD - Data").unwrap().size;
+    let clones = d.find("!APFS-CLONES.txt").size;
+
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let base = "Partition 1 - Macintosh HD - Data";
+    let items = [
+        ("copy.bin", false, 5_000),
+        ("orig.bin", false, 5_000),
+        ("docs", true, 0),
+        ("docs\\note.txt", false, 6),
+        ("!APFS-NOTICE.txt", false, notice),
+        ("!APFS-CLONES.txt", false, clones),
+    ];
+    let mut ops = MockOps::new();
+    assert_eq!(unpack(&img, &out, base, &items, &mut ops), TRUE);
+    assert_eq!(fs::read(out.join("copy.bin")).unwrap(), vec![7u8; 5_000]);
+    assert_eq!(fs::read(out.join("orig.bin")).unwrap(), vec![7u8; 5_000]);
+    assert_eq!(fs::read(out.join("docs").join("note.txt")).unwrap(), b"a note");
+    let n = fs::read_to_string(out.join("!APFS-NOTICE.txt")).unwrap();
+    assert!(n.contains("2 snapshot(s)") && n.len() as u64 == notice, "{n}");
+    let c = fs::read_to_string(out.join("!APFS-CLONES.txt")).unwrap();
+    assert!(c.contains("cloned files") && c.len() as u64 == clones, "{c}");
+
+    // the encrypted volume only has its notice
+    let out2 = dir.join("out2");
+    fs::create_dir_all(&out2).unwrap();
+    let mut ops = MockOps::new();
+    assert_eq!(unpack(&img, &out2, "Partition 1 - Vault", &[("!APFS-NOTICE.txt", false, 100)], &mut ops), TRUE);
+    assert!(fs::read_to_string(out2.join("!APFS-NOTICE.txt")).unwrap().contains("is encrypted"));
+    let mut ops = MockOps::new();
+    let _ = take_messages();
+    // not found -> the usual "skip this file?" question (answered Yes by the mock), nothing is written
+    unpack(&img, &out2, "Partition 1 - Vault", &[("secret.txt", false, 6)], &mut ops);
+    assert!(take_messages().iter().any(|m| m.contains("not found in the volume")));
+    assert!(!out2.join("secret.txt").exists(), "ciphertext is never extracted");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn apfs_single_volume_sits_in_the_root() {
+    let dir = temp_dir();
+    let img = dir.join("data.apfs");
+    let mut b = ApfsImageBuilder::new();
+    b.volume("Data").add_file("hello.txt", b"hello apfs").add_file("Re\u{301}sume\u{301}.txt", b"nfd");
+    fs::write(&img, b.build()).unwrap();
+    let (r, d) = list(&img);
+    assert_eq!(r, TRUE);
+    assert!(d.adds.iter().all(|a| a.parent.is_empty() && !a.is_dir));
+    assert_eq!(d.find("hello.txt").size, 10);
+    d.find("R\u{e9}sum\u{e9}.txt");
+    assert!(!d.adds.iter().any(|a| a.name.starts_with('!')), "no notice on a plain volume");
+
+    // a container without any volume is reported, not silently shown empty
+    let empty = dir.join("empty.apfs");
+    fs::write(&empty, ApfsImageBuilder::new().build()).unwrap();
+    let _ = take_messages();
+    let (r, _) = list(&empty);
+    assert_eq!(r, FALSE);
+    assert!(take_messages().iter().any(|m| m.contains("no volume")));
     fs::remove_dir_all(&dir).unwrap();
 }

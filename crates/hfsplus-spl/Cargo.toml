@@ -1,6 +1,6 @@
 [package]
 name = "hfsplus-spl"
-description = "macfs-plugins: plugin (.spl) pro Open Salamander / Altap Salamander, read-only přístup k HFS+/HFSX svazkům (64 bit)"
+description = "macfs-plugins: plugin (.spl) pro Open Salamander / Altap Salamander, read-only přístup k HFS+/HFSX svazkům a APFS kontejnerům (64 bit)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,11 @@ name = "hfsplus_spl"
 crate-type = ["cdylib", "rlib"] # cdylib = vlastní DLL pluginu (přejmenuje se na .spl), rlib = aby ho mohl linkovat `cargo test`
 
 [dependencies]
-hfsplus.workspace = true
 macfs-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Globalization", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
+apfs = { workspace = true, features = ["testutil"] }
 hfsplus = { workspace = true, features = ["testutil"] }

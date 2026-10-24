@@ -1,4 +1,4 @@
-# hfsplus-spl – HFS+/HFSX plugin pro Altap Salamander 4.0 / Open Salamander 5.0 (64 bit, jen čtení)
+# hfsplus-spl – HFS+/HFSX a APFS plugin pro Altap Salamander 4.0 / Open Salamander 5.0 (64 bit, jen čtení)
 
 Součást workspace [macfs-plugins](../../README.md).
 
@@ -24,7 +24,7 @@ bajtů). „Unicode“ je tedy jen na straně hostitelské aplikace, ne v rozhra
 
 ## Co plugin dělá a nedělá
 
-* Registruje se jako **panel archiver (jen prohlížení)** pro přípony `hfs` a `hfsdev`.
+* Registruje se jako **panel archiver (jen prohlížení)** pro přípony `hfs`, `apfs`, `hfsdev` a `apfsdev`.
   Salamander pozná archivy **jen podle přípony** (žádná detekce obsahem). Další přípony (`img`,
   `raw`, `dmg` po převodu na raw …) přidej v *Options → Configuration → Archives Associations in Panels*.
   Pozor: `iso`/`img`/`dmg` mívá přiřazené plugin UnISO.
@@ -36,8 +36,31 @@ bajtů). „Unicode“ je tedy jen na straně hostitelské aplikace, ne v rozhra
 * Není implementováno: zápis/mazání, „custom unpacker“ (Alt+F9), konfigurační dialog, vlastní sloupce,
   lokalizace (hlášky jsou anglicky).
 * Stejná omezení jako WCX verze: komprimované soubory se rozbalují celé do paměti, hard linky
-  (Time Machine) se zobrazí jako prázdné soubory, žurnál se nepřehrává, APFS/CoreStorage/DMG
+  (Time Machine) se zobrazí jako prázdné soubory, žurnál se nepřehrává, CoreStorage/DMG
   (UDIF) nejsou podporované, symlink se rozbalí jako textový soubor s cílem.
+
+
+## APFS
+
+Kromě HFS+/HFSX plugin otevře i **kontejnery APFS** (obraz, GPT/APM/MBR disk, `.apfsdev`/`.hfsdev`).
+Používá vendorovaný čistě rustový crate [`apfs` 0.4.1](https://crates.io/crates/apfs) (`vendor/apfs`,
+lokální úpravy v `vendor/apfs/PATCHES.md`: výběr svazku, příznaky svazku, detekce klonů).
+Kontejner s víc svazky (System, Data, Preboot, Recovery, VM …) se zobrazí jako složky
+`Partition N - název svazku`.
+
+Crate neumí **šifrování, snapshoty ani vztahy klonů**. Plugin to před čtením zjistí a nahlásí
+virtuálními textovými soubory, které se v seznamu chovají jako obyčejné soubory (jdou i rozbalit; v Salamanderu se místo dialogu používají právě tyto soubory):
+
+* `!APFS-NOTICE.txt` v kořeni svazku – svazek má snapshoty (zobrazuje se jen aktuální stav), je zapečetěný
+  (sealed system volume) nebo má nedokončený restore / probíhající přešifrování;
+* šifrovaný svazek (FileVault, hardwarové šifrování T2 / Apple silicon) se **nečte** – je v něm jen
+  `!APFS-NOTICE.txt` (bez klíče jsou jména i data šifrovaná);
+* `!APFS-CLONES.txt` – svazek obsahuje klonované soubory. Data klonů se čtou přes sdílené extenty
+  původního souboru, takže se vypíší i rozbalí normálně; nehlásí se jen vazba klon–originál.
+* svazek, který nejde otevřít (poškozený, sealed), má v sobě `!APFS-NOTICE.txt` s chybou.
+
+Syntetické APFS obrazy z testů vznikají podle specifikace Applu, **ne** z obrazu zapsaného macOS –
+první skutečný obraz vyzkoušej ručně (výpis, rozbalení, soubor s diakritikou).
 
 ## Build
 

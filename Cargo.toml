@@ -2,7 +2,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/macfs-core", "crates/hfsplus-wcx", "crates/hfsplus-spl"]
-exclude = ["vendor/hfsplus"] # upstream crate s lokálními patchi (viz vendor/hfsplus/PATCHES.md), není členem workspace
+exclude = ["vendor/hfsplus", "vendor/apfs"] # upstream cratey s lokálními patchi (viz PATCHES.md v adresářích), nejsou členy workspace
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,7 @@ publish = false
 
 [workspace.dependencies]
 hfsplus = { path = "vendor/hfsplus", version = "=0.4.0" }
+apfs = { path = "vendor/apfs", version = "=0.4.1" }
 unicode-normalization = "0.1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

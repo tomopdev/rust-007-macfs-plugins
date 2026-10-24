@@ -1,4 +1,4 @@
-# hfsplus-wcx – HFS+/HFSX plugin pro Total Commander (64 bit, jen čtení)
+# hfsplus-wcx – HFS+/HFSX a APFS plugin pro Total Commander (64 bit, jen čtení)
 
 Součást workspace [macfs-plugins](../../README.md).
 
@@ -15,6 +15,29 @@ WCX plugin v Rustu (edition 2024) nad crate [`hfsplus` 0.4.0](https://crates.io/
   koncové tečky/mezery a rezervovaná jména (CON, NUL …) se ošetří, kolize jmen dostanou ` (2)`,
 * extrakce s průběhem a možností přerušení (nedokončený soubor se smaže), zachová datum změny,
   dlouhé cesty (`\\?\`).
+
+
+## APFS
+
+Kromě HFS+/HFSX plugin otevře i **kontejnery APFS** (obraz, GPT/APM/MBR disk, `.apfsdev`/`.hfsdev`).
+Používá vendorovaný čistě rustový crate [`apfs` 0.4.1](https://crates.io/crates/apfs) (`vendor/apfs`,
+lokální úpravy v `vendor/apfs/PATCHES.md`: výběr svazku, příznaky svazku, detekce klonů).
+Kontejner s víc svazky (System, Data, Preboot, Recovery, VM …) se zobrazí jako složky
+`Partition N - název svazku`.
+
+Crate neumí **šifrování, snapshoty ani vztahy klonů**. Plugin to před čtením zjistí a nahlásí
+virtuálními textovými soubory, které se v seznamu chovají jako obyčejné soubory (jdou i rozbalit):
+
+* `!APFS-NOTICE.txt` v kořeni svazku – svazek má snapshoty (zobrazuje se jen aktuální stav), je zapečetěný
+  (sealed system volume) nebo má nedokončený restore / probíhající přešifrování;
+* šifrovaný svazek (FileVault, hardwarové šifrování T2 / Apple silicon) se **nečte** – je v něm jen
+  `!APFS-NOTICE.txt` (bez klíče jsou jména i data šifrovaná);
+* `!APFS-CLONES.txt` – svazek obsahuje klonované soubory. Data klonů se čtou přes sdílené extenty
+  původního souboru, takže se vypíší i rozbalí normálně; nehlásí se jen vazba klon–originál.
+* svazek, který nejde otevřít (poškozený, sealed), má v sobě `!APFS-NOTICE.txt` s chybou.
+
+Syntetické APFS obrazy z testů vznikají podle specifikace Applu, **ne** z obrazu zapsaného macOS –
+první skutečný obraz vyzkoušej ručně (výpis, rozbalení, soubor s diakritikou).
 
 ## Build
 
@@ -83,7 +106,7 @@ partition = 2
 * **Hard linky** (typicky Time Machine) crate nevyhodnocuje: odkaz se zobrazí jako prázdný soubor, data
   jsou ve složce `____HFS+ Private Data` / `.HFS+ Private Directory Data_` jako `iNode…`.
 * Žurnál (journal) se nepřehrává – po neuklidněném odpojení může být obraz mírně nekonzistentní.
-* **APFS, CoreStorage/FileVault, šifrované a komprimované DMG (UDIF)** nejsou podporované
+* **CoreStorage/FileVault (HFS+), šifrované a komprimované DMG (UDIF)** nejsou podporované
   (DMG nejdřív převeď na raw obraz).
 * Položky, jejichž původní název na disku obsahuje znak `/` (starý Mac OS), nelze přes crate adresovat
   a extrakce selže.

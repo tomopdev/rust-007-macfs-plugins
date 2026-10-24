@@ -9,6 +9,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "apfs"
+version = "0.4.1"
+dependencies = [
+ "byteorder",
+ "cmpfs",
+ "thiserror",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -65,6 +74,7 @@ dependencies = [
 name = "hfsplus-spl"
 version = "0.1.0"
 dependencies = [
+ "apfs",
  "hfsplus",
  "macfs-core",
  "windows-sys",
@@ -74,6 +84,7 @@ dependencies = [
 name = "hfsplus-wcx"
 version = "0.1.0"
 dependencies = [
+ "apfs",
  "hfsplus",
  "macfs-core",
  "windows-sys",
@@ -95,6 +106,8 @@ checksum = "32c51f6215e459d29ee8b61c52074f545fe5518bcb351c590c6e98aec21a5a00"
 name = "macfs-core"
 version = "0.1.0"
 dependencies = [
+ "apfs",
+ "hfsplus",
  "unicode-normalization",
  "windows-sys",
 ]

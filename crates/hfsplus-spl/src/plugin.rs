@@ -14,10 +14,11 @@ use crate::spl::*;
 use crate::util;
 use crate::win::{self, Answer, Kind};
 
-pub const PLUGIN_NAME: &str = "HFS+ (read-only)";
-const ABOUT_TEXT: &str = "HFS+ / HFSX read-only archiver plugin\n\nWritten in Rust on top of the hfsplus 0.4.0 crate \
-(including decmpfs transparent compression).\n\nOpens disk images and raw partitions; use a *.hfsdev link file for \
-physical disks (see README).";
+pub const PLUGIN_NAME: &str = "HFS+ / APFS (read-only)";
+const ABOUT_TEXT: &str = "HFS+ / HFSX / APFS read-only archiver plugin\n\nWritten in Rust on top of the hfsplus 0.4.0 and \
+apfs 0.4.1 crates (including decmpfs transparent compression).\n\nAPFS: encrypted volumes, snapshots and the clone \
+relationship are not supported yet; the plugin reports them in a '!APFS-NOTICE.txt' file inside the volume.\n\nOpens disk \
+images and raw partitions; use a *.hfsdev / *.apfsdev link file for physical disks (see README).";
 
 /// `CSalamanderGeneralAbstract*` received in `SalamanderPluginEntry`.
 pub static GENERAL: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
@@ -119,7 +120,7 @@ unsafe extern "system" fn p_connect(_this: *mut c_void, _parent: HWND, salamande
         }
         // Salamander recognises archives by extension only (no content detection).
         // SAFETY: valid host object; AddPanelArchiver is slot 2.
-        unsafe { ((*(*salamander).vtbl).AddPanelArchiver)(salamander, c"hfs;hfsdev".as_ptr(), FALSE, FALSE) }
+        unsafe { ((*(*salamander).vtbl).AddPanelArchiver)(salamander, c"hfs;apfs;hfsdev;apfsdev".as_ptr(), FALSE, FALSE) }
     })
 }
 unsafe extern "system" fn p_release_plugin_data(_this: *mut c_void, _pd: *mut c_void) {}
@@ -168,8 +169,8 @@ fn open_container(arc: &str, parent: HWND) -> Option<Container> {
         Ok(c) => Some(c),
         Err(e) => {
             let hint = if matches!(e, OpenError::NoVolume) {
-                "\n\nSalamander opens files by extension; the file must contain an HFS+/HFSX volume \
-                 (directly, or on a GPT / Apple partition map / MBR disk)."
+                "\n\nSalamander opens files by extension; the file must contain an HFS+/HFSX volume or an APFS \
+                 container (directly, or on a GPT / Apple partition map / MBR disk)."
             } else {
                 ""
             };
@@ -277,6 +278,13 @@ unsafe extern "system" fn a_list(
                     if it.is_dir {
                         stack.push((it.node(), join_panel(&prefix, &it.disp)));
                     }
+                }
+            }
+            // items known only after the whole walk (APFS "clones" notice)
+            for (prefix, it) in c.late_items() {
+                if !add_item(dir, &cstring(&prefix), &it) {
+                    clear(dir);
+                    return FALSE;
                 }
             }
             if !skipped.is_empty() {
@@ -493,7 +501,7 @@ unsafe extern "system" fn a_unpack_archive(
             }
 
             ops_call(ops, |v| {
-                (v.OpenProgressDialog)(ops, c"Unpacking HFS+ volume".as_ptr(), TRUE, null_mut(), FALSE);
+                (v.OpenProgressDialog)(ops, c"Unpacking Mac volume".as_ptr(), TRUE, null_mut(), FALSE);
                 (v.ProgressSetTotalSize)(ops, &QuadWord::new(0), &QuadWord::new(total));
             });
 
@@ -572,7 +580,7 @@ unsafe extern "system" fn a_unpack_one(
             let dest = Path::new(&target).join(&file);
 
             ops_call(ops, |v| {
-                (v.OpenProgressDialog)(ops, c"Unpacking HFS+ volume".as_ptr(), FALSE, null_mut(), FALSE);
+                (v.OpenProgressDialog)(ops, c"Unpacking Mac volume".as_ptr(), FALSE, null_mut(), FALSE);
                 (v.ProgressSetTotalSize)(ops, &QuadWord::new(item.size + 1), &QuadWord::MAX);
             });
             let mut ex = Extractor { c, ops, overwrite: Overwrite::All, skip_errors: false, single: true };
@@ -662,13 +670,13 @@ pub unsafe fn plugin_entry(entry: *mut Entry) -> *mut c_void {
             GENERAL.store((vt.GetSalamanderGeneral)(entry), Ordering::Release);
             let ok = (vt.SetBasicPluginData)(
                 entry,
-                c"HFS+ (read-only)".as_ptr(),
+                c"HFS+ / APFS (read-only)".as_ptr(),
                 FUNCTION_PANELARCHIVERVIEW,
                 c"0.1.0".as_ptr(),
-                c"MIT licensed; hfsplus crate by Dil4rd".as_ptr(),
-                c"Opens HFS+/HFSX disk images and partitions (read-only), including decmpfs compressed files.".as_ptr(),
+                c"MIT licensed; hfsplus and apfs crates by Dil4rd".as_ptr(),
+                c"Opens HFS+/HFSX and APFS disk images and partitions (read-only), including decmpfs compressed files.".as_ptr(),
                 c"HFSPLUS".as_ptr(),
-                c"hfs;hfsdev".as_ptr(),
+                c"hfs;apfs;hfsdev;apfsdev".as_ptr(),
                 null(),
             );
             if ok == 0 {

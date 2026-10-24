@@ -1,19 +1,29 @@
-//! Locating HFS+/HFSX volumes inside a source: bare volume (also inside the
-//! classic HFS wrapper), GPT, Apple Partition Map and MBR disks, and the
-//! `.hfsdev` text files that point at raw devices.
+//! Locating HFS+/HFSX volumes and APFS containers inside a source: bare volume
+//! (HFS+ also inside the classic HFS wrapper), GPT, Apple Partition Map and MBR
+//! disks, and the `.hfsdev` / `.apfsdev` text files that point at raw devices.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::source::DiskSource;
 
-/// One HFS+ volume found in a source.
+/// Which file system a [`Part`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsKind {
+    /// HFS+ / HFSX volume.
+    HfsPlus,
+    /// APFS container (one or more volumes).
+    Apfs,
+}
+
+/// One HFS+ volume or APFS container found in a source.
 #[derive(Debug, Clone)]
 pub struct Part {
     /// Partition name from the partition table (may be empty).
     pub label: String,
     pub start: u64,
     pub len: u64,
+    pub kind: FsKind,
 }
 
 fn be16(b: &[u8], o: usize) -> u16 {
@@ -36,7 +46,7 @@ pub fn hfs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option
     let mut h = [0u8; 512];
     src.read_exact_at(start.checked_add(1024)?, &mut h).ok()?;
     match be16(&h, 0) {
-        0x482B | 0x4858 => Some(Part { label: label.to_string(), start, len }),
+        0x482B | 0x4858 => Some(Part { label: label.to_string(), start, len, kind: FsKind::HfsPlus }),
         // Classic HFS master directory block wrapping an embedded HFS+ volume.
         0x4244 => {
             if be16(&h, 124) != 0x482B {
@@ -53,17 +63,33 @@ pub fn hfs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option
             let l = embed_count * block;
             let mut sig = [0u8; 2];
             src.read_exact_at(s.checked_add(1024)?, &mut sig).ok()?;
-            (u16::from_be_bytes(sig) == 0x482B).then(|| Part { label: label.to_string(), start: s, len: l })
+            (u16::from_be_bytes(sig) == 0x482B)
+                .then(|| Part { label: label.to_string(), start: s, len: l, kind: FsKind::HfsPlus })
         }
         _ => None,
     }
 }
 
-/// All HFS+ volumes of a source. A bare volume at offset 0 wins; otherwise
-/// GPT, then Apple Partition Map, then MBR.
+/// Does an APFS container start at `start`? (`nx_superblock_t`: magic "NXSB" at +32,
+/// block size at +36)
+pub fn apfs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option<Part> {
+    let mut h = [0u8; 8];
+    src.read_exact_at(start.checked_add(32)?, &mut h).ok()?;
+    let block = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
+    (&h[..4] == b"NXSB" && block.is_power_of_two() && (4096..=65536).contains(&block))
+        .then(|| Part { label: label.to_string(), start, len, kind: FsKind::Apfs })
+}
+
+/// HFS+/HFSX volume or APFS container at `start`.
+pub fn fs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option<Part> {
+    hfs_at(src, start, len, label).or_else(|| apfs_at(src, start, len, label))
+}
+
+/// All HFS+ volumes and APFS containers of a source. A bare volume at offset 0
+/// wins; otherwise GPT, then Apple Partition Map, then MBR.
 pub fn find_volumes(src: &mut DiskSource) -> Vec<Part> {
     let total = src.len();
-    if let Some(p) = hfs_at(src, 0, total, "") {
+    if let Some(p) = fs_at(src, 0, total, "") {
         return vec![p];
     }
     let mut parts = gpt(src);
@@ -110,7 +136,7 @@ fn gpt(src: &mut DiskSource) -> Vec<Part> {
                 .take_while(|&u| u != 0)
                 .collect();
             let name = String::from_utf16_lossy(&units);
-            if let Some(p) = hfs_at(src, start, len, &name) {
+            if let Some(p) = fs_at(src, start, len, &name) {
                 out.push(p);
             }
         }
@@ -144,7 +170,7 @@ fn apm(src: &mut DiskSource) -> Vec<Part> {
         let start = be32(&e, 8) as u64 * bs;
         let len = be32(&e, 12) as u64 * bs;
         let name = cstr(&e[16..48]);
-        if let Some(p) = hfs_at(src, start, len, &name) {
+        if let Some(p) = fs_at(src, start, len, &name) {
             out.push(p);
         }
     }
@@ -165,7 +191,7 @@ fn mbr(src: &mut DiskSource) -> Vec<Part> {
         }
         let start = le32(e, 8) as u64 * 512;
         let len = le32(e, 12) as u64 * 512;
-        if let Some(p) = hfs_at(src, start, len, "") {
+        if let Some(p) = fs_at(src, start, len, "") {
             out.push(p);
         }
     }
@@ -173,10 +199,10 @@ fn mbr(src: &mut DiskSource) -> Vec<Part> {
 }
 
 // ---------------------------------------------------------------------------
-// .hfsdev link files
+// .hfsdev / .apfsdev link files
 // ---------------------------------------------------------------------------
 
-/// Contents of a `.hfsdev` file.
+/// Contents of a `.hfsdev` / `.apfsdev` file (same format, the extension is only a hint for the user).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DevSpec {
     pub device: PathBuf,
@@ -186,8 +212,9 @@ pub struct DevSpec {
     pub partition: Option<usize>,
 }
 
+/// `.hfsdev` or `.apfsdev` link file?
 pub fn is_hfsdev(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("hfsdev"))
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("hfsdev") || e.eq_ignore_ascii_case("apfsdev"))
 }
 
 fn parse_num(s: &str) -> Result<u64, String> {
@@ -252,7 +279,7 @@ pub enum LocateError {
     Config(String),
 }
 
-/// Open `path` (image file or `.hfsdev` link) and find its HFS+ volumes.
+/// Open `path` (image file or `.hfsdev` / `.apfsdev` link) and find its HFS+ volumes / APFS containers.
 pub fn locate(path: &Path) -> Result<(DiskSource, Vec<Part>), LocateError> {
     if !is_hfsdev(path) {
         let mut src = DiskSource::open(path).map_err(LocateError::Io)?;
@@ -265,7 +292,7 @@ pub fn locate(path: &Path) -> Result<(DiskSource, Vec<Part>), LocateError> {
     let mut parts = match spec.offset {
         Some(off) => {
             let len = spec.length.unwrap_or_else(|| src.len().saturating_sub(off));
-            hfs_at(&mut src, off, len, "").into_iter().collect()
+            fs_at(&mut src, off, len, "").into_iter().collect()
         }
         None => find_volumes(&mut src),
     };
@@ -287,6 +314,7 @@ mod tests {
         assert_eq!(s.offset, Some(16));
         assert!(parse_hfsdev("offset=1").is_err());
         assert!(parse_hfsdev("device=x\nfoo=1").is_err());
+        assert!(is_hfsdev(Path::new("a.apfsdev")) && is_hfsdev(Path::new("a.HFSDEV")) && !is_hfsdev(Path::new("a.img")));
     }
 
     #[test]

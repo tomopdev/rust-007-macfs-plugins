@@ -1,7 +1,7 @@
 #![allow(clippy::missing_safety_doc)] // exports follow the SDK ABI; contracts are in the SDK headers
 
 //! Open Salamander 5.0 / Altap Salamander 4.0 plugin (`.spl`) for read-only access
-//! to HFS+/HFSX volumes, implemented in Rust against the C++ plugin SDK ABI.
+//! to HFS+/HFSX volumes and APFS containers, implemented in Rust against the C++ plugin SDK ABI.
 //!
 //! The SDK interfaces are abstract C++ classes; `spl.rs` reproduces their vtable
 //! layout by hand. Exported symbols (same as the SDK's `.def` file):
@@ -13,7 +13,7 @@ pub mod spl;
 pub mod win;
 
 // sdílené moduly z macfs-core (zpřístupněné pod původními cestami)
-pub use macfs_core::{detect, source, util};
+pub use macfs_core::{detect, source, util, volume};
 
 use std::ffi::{c_int, c_void};
 

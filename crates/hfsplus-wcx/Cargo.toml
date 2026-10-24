@@ -1,6 +1,6 @@
 [package]
 name = "hfsplus-wcx"
-description = "macfs-plugins: Total Commander WCX plugin, read-only přístup k HFS+/HFSX svazkům (64 bit)"
+description = "macfs-plugins: Total Commander WCX plugin, read-only přístup k HFS+/HFSX svazkům a APFS kontejnerům (64 bit)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,11 @@ name = "hfsplus_wcx"  # cdylib = vlastní DLL pluginu (přejmenuje se na .wcx64)
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-hfsplus.workspace = true
 macfs-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 
 [dev-dependencies]
+apfs = { workspace = true, features = ["testutil"] }
 hfsplus = { workspace = true, features = ["testutil"] }
