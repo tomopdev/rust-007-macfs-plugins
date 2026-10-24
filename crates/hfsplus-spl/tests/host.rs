@@ -1,0 +1,655 @@
+#![allow(clippy::ptr_arg, clippy::manual_dangling_ptr, clippy::fn_to_numeric_cast)]
+
+//! Tests the plugin through its real ABI: a mock "Salamander" built from the same
+//! vtable layouts (entry object, general object, directory, progress dialog,
+//! enumerator) drives `SalamanderPluginEntry` and the archiver methods.
+//! The synthetic HFSX images come from the `hfsplus` crate's `testutil`.
+
+use std::alloc::{Layout, alloc, dealloc};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::fs;
+use std::path::PathBuf;
+use std::ptr::{null, null_mut};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use hfsplus::testutil::HfsPlusImageBuilder;
+use hfsplus_spl::spl::*;
+use hfsplus_spl::win::{Answer, set_answer, take_messages};
+use hfsplus_spl::{SalamanderPluginEntry, SalamanderPluginGetReqVer, SalamanderPluginGetSDKVer};
+
+// ---------------------------------------------------------------------------
+// mock CSalamanderGeneralAbstract (only the slots the plugin uses)
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+struct MockGeneral {
+    vtbl: *const usize,
+}
+
+unsafe extern "system" fn g_alloc(_this: *mut c_void, n: c_int) -> *mut c_void {
+    let layout = Layout::from_size_align(n as usize + 16, 16).unwrap();
+    unsafe {
+        let p = alloc(layout);
+        *(p as *mut usize) = n as usize + 16;
+        p.add(16) as *mut c_void
+    }
+}
+unsafe extern "system" fn g_free(_this: *mut c_void, p: *mut c_void) {
+    if p.is_null() {
+        return;
+    }
+    unsafe {
+        let base = (p as *mut u8).sub(16);
+        let size = *(base as *const usize);
+        dealloc(base, Layout::from_size_align(size, 16).unwrap());
+    }
+}
+unsafe extern "system" fn g_parent(_this: *mut c_void) -> HWND {
+    null_mut()
+}
+
+fn general() -> *mut c_void {
+    static G: OnceLock<usize> = OnceLock::new();
+    *G.get_or_init(|| {
+        let vt: &'static mut [usize; 40] = Box::leak(Box::new([0usize; 40]));
+        vt[GENERAL_SLOT_GET_MSGBOX_PARENT] = g_parent as *const () as usize;
+        vt[GENERAL_SLOT_ALLOC] = g_alloc as *const () as usize;
+        vt[GENERAL_SLOT_FREE] = g_free as *const () as usize;
+        Box::leak(Box::new(MockGeneral { vtbl: vt.as_ptr() })) as *mut MockGeneral as usize
+    }) as *mut c_void
+}
+
+// ---------------------------------------------------------------------------
+// mock CSalamanderPluginEntryAbstract / CSalamanderConnectAbstract
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+struct MockEntry {
+    vtbl: *const EntryVtbl,
+    version: c_int,
+    name: String,
+    functions: u32,
+    extensions: String,
+    fs_name_null: bool,
+}
+
+unsafe extern "system" fn e_version(this: *mut Entry) -> c_int {
+    unsafe { (*(this as *mut MockEntry)).version }
+}
+unsafe extern "system" fn e_parent(_this: *mut Entry) -> HWND {
+    null_mut()
+}
+unsafe extern "system" fn e_set_basic(
+    this: *mut Entry,
+    name: *const c_char,
+    functions: u32,
+    _version: *const c_char,
+    _copyright: *const c_char,
+    _description: *const c_char,
+    _reg: *const c_char,
+    ext: *const c_char,
+    fs: *const c_char,
+) -> BOOL {
+    unsafe {
+        let m = &mut *(this as *mut MockEntry);
+        m.name = CStr::from_ptr(name).to_string_lossy().into_owned();
+        m.functions = functions;
+        m.extensions = CStr::from_ptr(ext).to_string_lossy().into_owned();
+        m.fs_name_null = fs.is_null();
+    }
+    TRUE
+}
+unsafe extern "system" fn e_general(_this: *mut Entry) -> *mut c_void {
+    general()
+}
+
+static ENTRY_VTBL: EntryVtbl = EntryVtbl {
+    GetVersion: e_version,
+    GetParentWindow: e_parent,
+    GetSalamanderDebug: null(),
+    SetBasicPluginData: e_set_basic,
+    GetSalamanderGeneral: e_general,
+};
+
+impl MockEntry {
+    fn new(version: c_int) -> Box<MockEntry> {
+        Box::new(MockEntry { vtbl: &ENTRY_VTBL, version, name: String::new(), functions: 0, extensions: String::new(), fs_name_null: false })
+    }
+}
+
+#[repr(C)]
+struct MockConnect {
+    vtbl: *const ConnectVtbl,
+    calls: Vec<(String, BOOL, BOOL)>,
+}
+unsafe extern "system" fn c_add_archiver(this: *mut Connect, ext: *const c_char, edit: BOOL, upd: BOOL) {
+    unsafe {
+        (*(this as *mut MockConnect)).calls.push((CStr::from_ptr(ext).to_string_lossy().into_owned(), edit, upd));
+    }
+}
+static CONNECT_VTBL: ConnectVtbl = ConnectVtbl { AddCustomPacker: null(), AddCustomUnpacker: null(), AddPanelArchiver: c_add_archiver };
+
+// ---------------------------------------------------------------------------
+// mock CSalamanderDirectoryAbstract
+// ---------------------------------------------------------------------------
+
+/// Decode ANSI bytes the way Salamander's host would (emulated code page on Linux).
+fn ansi(b: &[u8]) -> String {
+    hfsplus_spl::win::from_ansi(b)
+}
+
+#[derive(Debug, Clone)]
+struct Add {
+    is_dir: bool,
+    parent: String,
+    name: String,
+    ext: String,
+    size: u64,
+    attr: u32,
+}
+
+#[repr(C)]
+struct MockDir {
+    vtbl: *const DirVtbl,
+    adds: Vec<Add>,
+    valid: u32,
+    cleared: bool,
+    names: Vec<*mut c_char>,
+}
+
+unsafe extern "system" fn d_clear(this: *mut Dir, _pd: *mut c_void) {
+    unsafe { (*(this as *mut MockDir)).cleared = true }
+}
+unsafe extern "system" fn d_valid(this: *mut Dir, v: u32) {
+    unsafe { (*(this as *mut MockDir)).valid = v }
+}
+unsafe extern "system" fn d_flags(_this: *mut Dir, _f: u32) {}
+unsafe fn record(this: *mut Dir, path: *const c_char, fd: *mut FileData, is_dir: bool) -> BOOL {
+    unsafe {
+        let m = &mut *(this as *mut MockDir);
+        let f = std::ptr::read_unaligned(fd);
+        let name_bytes = CStr::from_ptr(f.Name).to_bytes();
+        assert_eq!(f.name_len(), name_bytes.len(), "NameLen must equal strlen(Name)");
+        let name = ansi(name_bytes);
+        assert_eq!((f.Bits >> 12) & 0xF, ICONOVERLAYINDEX_NOTUSED);
+        assert!(f.DosName.is_null());
+        assert!(f.Ext as usize >= f.Name as usize && f.Ext as usize <= f.Name as usize + name_bytes.len(), "Ext must point into Name");
+        m.adds.push(Add {
+            is_dir,
+            parent: ansi(CStr::from_ptr(path).to_bytes()),
+            name,
+            ext: ansi(CStr::from_ptr(f.Ext).to_bytes()),
+            size: f.Size.value(),
+            attr: f.Attr,
+        });
+        m.names.push(f.Name); // freed in Drop, like Salamander would
+        TRUE
+    }
+}
+unsafe extern "system" fn d_add_file(this: *mut Dir, path: *const c_char, fd: *mut FileData, _pd: *mut c_void) -> BOOL {
+    unsafe { record(this, path, fd, false) }
+}
+unsafe extern "system" fn d_add_dir(this: *mut Dir, path: *const c_char, fd: *mut FileData, _pd: *mut c_void) -> BOOL {
+    unsafe { record(this, path, fd, true) }
+}
+static DIR_VTBL: DirVtbl = DirVtbl { Clear: d_clear, SetValidData: d_valid, SetFlags: d_flags, AddFile: d_add_file, AddDir: d_add_dir };
+
+impl MockDir {
+    fn new() -> Box<MockDir> {
+        Box::new(MockDir { vtbl: &DIR_VTBL, adds: vec![], valid: 0, cleared: false, names: vec![] })
+    }
+    fn as_dir(&mut self) -> *mut Dir {
+        self as *mut MockDir as *mut Dir
+    }
+    fn find(&self, name: &str) -> &Add {
+        self.adds.iter().find(|a| a.name == name).unwrap_or_else(|| panic!("{name} not listed: {:?}", self.adds))
+    }
+}
+impl Drop for MockDir {
+    fn drop(&mut self) {
+        for &n in &self.names {
+            unsafe { g_free(null_mut(), n as *mut c_void) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mock CSalamanderForOperationsAbstract (progress dialog)
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+struct MockOps {
+    vtbl: *const OpsVtbl,
+    opened: u32,
+    closed: u32,
+    two_bars: bool,
+    total2: u64,
+    added: u64,
+    texts: Vec<String>,
+    /// ProgressAddSize starts returning FALSE once this many bytes were reported.
+    cancel_after: Option<u64>,
+}
+unsafe extern "system" fn o_open(this: *mut Ops, _t: *const c_char, two: BOOL, _p: HWND, _f: BOOL) {
+    unsafe {
+        let m = &mut *(this as *mut MockOps);
+        m.opened += 1;
+        m.two_bars = two != 0;
+    }
+}
+unsafe extern "system" fn o_text(this: *mut Ops, txt: *const c_char, _d: BOOL) {
+    unsafe { (*(this as *mut MockOps)).texts.push(CStr::from_ptr(txt).to_string_lossy().into_owned()) }
+}
+unsafe extern "system" fn o_total(this: *mut Ops, _t1: *const QuadWord, t2: *const QuadWord) {
+    unsafe {
+        let m = &mut *(this as *mut MockOps);
+        if *t2 != QuadWord::MAX && m.two_bars && m.total2 == 0 {
+            m.total2 = (*t2).value();
+        }
+    }
+}
+unsafe extern "system" fn o_set_size(_this: *mut Ops, _a: *const QuadWord, _b: *const QuadWord, _d: BOOL) -> BOOL {
+    TRUE
+}
+unsafe extern "system" fn o_add(this: *mut Ops, n: c_int, _d: BOOL) -> BOOL {
+    unsafe {
+        let m = &mut *(this as *mut MockOps);
+        m.added += n as u64;
+        match m.cancel_after {
+            Some(limit) if m.added >= limit => FALSE,
+            _ => TRUE,
+        }
+    }
+}
+unsafe extern "system" fn o_enable(_this: *mut Ops, _e: BOOL) {}
+unsafe extern "system" fn o_hwnd(_this: *mut Ops) -> HWND {
+    null_mut()
+}
+unsafe extern "system" fn o_close(this: *mut Ops) {
+    unsafe { (*(this as *mut MockOps)).closed += 1 }
+}
+static OPS_VTBL: OpsVtbl = OpsVtbl {
+    OpenProgressDialog: o_open,
+    ProgressDialogAddText: o_text,
+    ProgressSetTotalSize: o_total,
+    ProgressSetSize: o_set_size,
+    ProgressAddSize: o_add,
+    ProgressEnableCancel: o_enable,
+    ProgressGetHWND: o_hwnd,
+    CloseProgressDialog: o_close,
+};
+impl MockOps {
+    fn new() -> Box<MockOps> {
+        Box::new(MockOps { vtbl: &OPS_VTBL, opened: 0, closed: 0, two_bars: false, total2: 0, added: 0, texts: vec![], cancel_after: None })
+    }
+    fn as_ops(&mut self) -> *mut Ops {
+        self as *mut MockOps as *mut Ops
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mock SalEnumSelection
+// ---------------------------------------------------------------------------
+
+struct EnumState {
+    items: Vec<(CString, bool, u64)>,
+    pos: usize,
+}
+unsafe extern "system" fn enum_cb(
+    _parent: HWND,
+    enum_files: c_int,
+    is_dir: *mut BOOL,
+    size: *mut QuadWord,
+    file_data: *mut *const FileData,
+    param: *mut c_void,
+    err: *mut c_int,
+) -> *const c_char {
+    unsafe {
+        let st = &mut *(param as *mut EnumState);
+        if enum_files == -1 {
+            st.pos = 0;
+            return null();
+        }
+        if !err.is_null() {
+            *err = SALENUM_SUCCESS;
+        }
+        if !file_data.is_null() {
+            *file_data = null();
+        }
+        let Some((name, dir, sz)) = st.items.get(st.pos) else { return null() };
+        st.pos += 1;
+        if !is_dir.is_null() {
+            *is_dir = *dir as BOOL;
+        }
+        if !size.is_null() {
+            *size = QuadWord::new(*sz);
+        }
+        name.as_ptr()
+    }
+}
+fn enumerator(items: &[(&str, bool, u64)]) -> Box<EnumState> {
+    Box::new(EnumState { items: items.iter().map(|(n, d, s)| (CString::new(*n).unwrap(), *d, *s)).collect(), pos: 0 })
+}
+
+// ---------------------------------------------------------------------------
+// fixtures
+// ---------------------------------------------------------------------------
+
+static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+fn temp_dir() -> PathBuf {
+    let d = std::env::temp_dir().join(format!("hfsplus-spl-test-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst)));
+    fs::create_dir_all(&d).unwrap();
+    d
+}
+
+const NIHON: &str = "\u{65e5}\u{672c}.txt"; // not representable in the emulated ANSI code page
+const CHUGOKU: &str = "\u{4e2d}\u{56fd}.txt";
+
+fn flat_image() -> Vec<u8> {
+    HfsPlusImageBuilder::new()
+        .add_file("hello.txt", b"hello hfs+", 0o644)
+        .add_file("big.bin", &vec![0xAB; 600_000], 0o644)
+        .add_file(NIHON, b"nihon", 0o644)
+        .add_file(CHUGOKU, b"chugoku", 0o644)
+        .add_file("a:b?.txt", b"illegal", 0o644)
+        .add_file("Re\u{301}sume\u{301}.txt", b"nfd", 0o644)
+        .build()
+}
+
+fn small_image(tag: &str) -> Vec<u8> {
+    HfsPlusImageBuilder::new().add_file("hello.txt", tag.as_bytes(), 0o644).build()
+}
+
+/// GPT disk with one HFS+ partition per image (512-byte sectors), 2 MiB apart.
+fn gpt_disk(parts: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let sector = 512usize;
+    let stride = 2 << 20;
+    let mut disk = vec![0u8; stride * (parts.len() + 1)];
+    let h = sector;
+    disk[h..h + 8].copy_from_slice(b"EFI PART");
+    disk[h + 72..h + 80].copy_from_slice(&2u64.to_le_bytes());
+    disk[h + 80..h + 84].copy_from_slice(&8u32.to_le_bytes());
+    disk[h + 84..h + 88].copy_from_slice(&128u32.to_le_bytes());
+    for (i, (label, vol)) in parts.iter().enumerate() {
+        let start = stride * (i + 1);
+        let e = 2 * sector + i * 128;
+        disk[e..e + 16].copy_from_slice(&[0x00, 0x53, 0x46, 0x48, 0x00, 0x00, 0xAA, 0x11, 0xAA, 0x11, 0x00, 0x30, 0x65, 0x43, 0xEC, 0xAC]);
+        disk[e + 32..e + 40].copy_from_slice(&((start / sector) as u64).to_le_bytes());
+        disk[e + 40..e + 48].copy_from_slice(&(((start + vol.len()) / sector - 1) as u64).to_le_bytes());
+        for (j, u) in label.encode_utf16().enumerate() {
+            disk[e + 56 + j * 2..e + 58 + j * 2].copy_from_slice(&u.to_le_bytes());
+        }
+        disk[start..start + vol.len()].copy_from_slice(vol);
+    }
+    disk
+}
+
+/// The archiver interface as Salamander obtains it: entry -> plugin -> archiver.
+fn archiver() -> &'static ArchiverVtbl {
+    let mut e = MockEntry::new(103);
+    unsafe {
+        let obj = SalamanderPluginEntry(&mut *e as *mut MockEntry as *mut Entry);
+        assert!(!obj.is_null());
+        let pvt = &*(*(obj as *mut Obj<PluginVtbl>)).vtbl;
+        let a = (pvt.GetInterfaceForArchiver)(obj);
+        assert!(!a.is_null());
+        &*(*(a as *const Obj<ArchiverVtbl>)).vtbl
+    }
+}
+
+fn list(path: &PathBuf) -> (BOOL, Box<MockDir>) {
+    let a = archiver();
+    let mut dir = MockDir::new();
+    let mut ops = MockOps::new();
+    let c = CString::new(path.to_str().unwrap()).unwrap();
+    let mut pd: *mut c_void = 1 as *mut c_void;
+    let r = unsafe { (a.ListArchive)(null_mut(), ops.as_ops(), c.as_ptr(), dir.as_dir(), &mut pd) };
+    assert!(pd.is_null(), "plugin must report no plugin data interface");
+    (r, dir)
+}
+
+fn unpack(arc: &PathBuf, target: &PathBuf, root: &str, items: &[(&str, bool, u64)], ops: &mut MockOps) -> BOOL {
+    let a = archiver();
+    let c = CString::new(arc.to_str().unwrap()).unwrap();
+    let t = CString::new(target.to_str().unwrap()).unwrap();
+    let r = CString::new(root).unwrap();
+    let mut st = enumerator(items);
+    unsafe {
+        (a.UnpackArchive)(null_mut(), ops.as_ops(), c.as_ptr(), null_mut(), t.as_ptr(), r.as_ptr(), enum_cb, &mut *st as *mut EnumState as *mut c_void)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn entry_points_and_connect() {
+    assert_eq!(SalamanderPluginGetReqVer(), 102);
+    assert_eq!(SalamanderPluginGetSDKVer(), 103);
+
+    // too old host -> refused with a message
+    let _ = take_messages();
+    let mut old = MockEntry::new(101);
+    let r = unsafe { SalamanderPluginEntry(&mut *old as *mut MockEntry as *mut Entry) };
+    assert!(r.is_null());
+    assert!(take_messages().iter().any(|m| m.contains("requires")));
+
+    // Altap Salamander 4.0 (102) and Open Salamander 5.0 (103) both accepted
+    for v in [102, 103] {
+        let mut e = MockEntry::new(v);
+        let obj = unsafe { SalamanderPluginEntry(&mut *e as *mut MockEntry as *mut Entry) };
+        assert!(!obj.is_null());
+        assert_eq!(e.functions, FUNCTION_PANELARCHIVERVIEW);
+        assert_eq!(e.extensions, "hfs;hfsdev");
+        assert!(e.fs_name_null);
+        assert!(e.name.contains("HFS+"));
+
+        unsafe {
+            let pvt = &*(*(obj as *mut Obj<PluginVtbl>)).vtbl;
+            let mut conn = MockConnect { vtbl: &CONNECT_VTBL, calls: vec![] };
+            (pvt.Connect)(obj, null_mut(), &mut conn as *mut MockConnect as *mut Connect);
+            assert_eq!(conn.calls, vec![("hfs;hfsdev".to_string(), FALSE, FALSE)]);
+            assert_eq!(
+                (pvt.GetInterfaceForArchiver)(obj),
+                &hfsplus_spl::plugin::ARCHIVER_OBJ as *const Obj<ArchiverVtbl> as *mut c_void
+            );
+            assert!((pvt.GetInterfaceForViewer)(obj).is_null());
+            assert!((pvt.GetInterfaceForFS)(obj).is_null());
+            assert!((pvt.GetInterfaceForMenuExt)(obj).is_null());
+            assert_eq!((pvt.Release)(obj, null_mut(), FALSE), TRUE);
+        }
+    }
+}
+#[test]
+fn list_flat_volume() {
+    let dir = temp_dir();
+    let img = dir.join("vol.hfs");
+    fs::write(&img, flat_image()).unwrap();
+
+    let (r, d) = list(&img);
+    assert_eq!(r, TRUE);
+    assert!(!d.cleared);
+    assert_eq!(d.valid & VALID_DATA_SIZE, VALID_DATA_SIZE);
+    assert_eq!(d.valid & 0x0002, 0, "DOS names are not provided");
+    assert!(d.adds.iter().all(|a| a.parent.is_empty() && !a.is_dir));
+
+    let hello = d.find("hello.txt");
+    assert_eq!((hello.size, hello.ext.as_str(), hello.attr), (10, "txt", FILE_ATTRIBUTE_ARCHIVE));
+    assert_eq!(d.find("big.bin").size, 600_000);
+    assert_eq!(d.find("big.bin").ext, "bin");
+    d.find("a_b_.txt"); // illegal characters replaced
+    d.find("R\u{e9}sum\u{e9}.txt"); // NFC (and representable in the ANSI page)
+    // two names that collapse to the same ANSI name stay distinguishable
+    d.find("__.txt");
+    d.find("__ (2).txt");
+    fs::remove_dir_all(&dir).unwrap();
+}
+#[test]
+fn list_multi_volume_puts_dirs_before_their_files() {
+    let dir = temp_dir();
+    let disk = dir.join("disk.img");
+    fs::write(&disk, gpt_disk(&[("one", small_image("first")), ("two", small_image("second"))])).unwrap();
+
+    let (r, d) = list(&disk);
+    assert_eq!(r, TRUE);
+    let kinds: Vec<(bool, &str, &str)> = d.adds.iter().map(|a| (a.is_dir, a.parent.as_str(), a.name.as_str())).collect();
+    for part in ["Partition 1 - one", "Partition 2 - two"] {
+        let dir_pos = kinds.iter().position(|k| *k == (true, "", part)).unwrap_or_else(|| panic!("{kinds:?}"));
+        let file_pos = kinds.iter().position(|k| *k == (false, part, "hello.txt")).unwrap_or_else(|| panic!("{kinds:?}"));
+        assert!(dir_pos < file_pos, "AddDir must precede AddFile into it");
+    }
+    assert_eq!(d.find("Partition 1 - one").attr, FILE_ATTRIBUTE_DIRECTORY);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn list_rejects_non_hfs_with_message() {
+    let dir = temp_dir();
+    let junk = dir.join("junk.hfs");
+    fs::write(&junk, vec![7u8; 100_000]).unwrap();
+    let _ = take_messages();
+    let (r, _d) = list(&junk);
+    assert_eq!(r, FALSE);
+    assert!(take_messages().iter().any(|m| m.contains("no HFS+")));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn unpack_archive_keeps_full_unicode_names() {
+    let dir = temp_dir();
+    let img = dir.join("vol.hfs");
+    fs::write(&img, flat_image()).unwrap();
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+
+    // the panel shows ANSI-safe names, Salamander hands those back
+    let items = [("hello.txt", false, 10), ("big.bin", false, 600_000), ("__.txt", false, 7), ("__ (2).txt", false, 5), ("a_b_.txt", false, 7)];
+    let mut ops = MockOps::new();
+    assert_eq!(unpack(&img, &out, "", &items, &mut ops), TRUE);
+
+    assert_eq!(fs::read(out.join("hello.txt")).unwrap(), b"hello hfs+");
+    assert_eq!(fs::read(out.join("big.bin")).unwrap(), vec![0xAB; 600_000]);
+    // extracted under the real Unicode names, content matches the right file
+    assert_eq!(fs::read(out.join(CHUGOKU)).unwrap(), b"chugoku");
+    assert_eq!(fs::read(out.join(NIHON)).unwrap(), b"nihon");
+    assert_eq!(fs::read(out.join("a_b_.txt")).unwrap(), b"illegal");
+
+    assert_eq!((ops.opened, ops.closed, ops.two_bars), (1, 1, true));
+    let expected_total: u64 = items.iter().map(|i| i.2 + 1).sum();
+    assert_eq!(ops.total2, expected_total);
+    assert!(ops.added >= 600_000 + 10 + 7 + 5 + 7);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn unpack_archive_respects_archive_root() {
+    let dir = temp_dir();
+    let disk = dir.join("disk.img");
+    fs::write(&disk, gpt_disk(&[("one", small_image("first")), ("two", small_image("second"))])).unwrap();
+
+    // root = a folder: enumerated names are relative to it
+    let out1 = dir.join("out1");
+    fs::create_dir_all(&out1).unwrap();
+    let mut ops = MockOps::new();
+    assert_eq!(unpack(&disk, &out1, "Partition 2 - two", &[("hello.txt", false, 6)], &mut ops), TRUE);
+    assert_eq!(fs::read(out1.join("hello.txt")).unwrap(), b"second");
+
+    // root = archive root: the whole path is part of the name; directories are created
+    let out2 = dir.join("out2");
+    fs::create_dir_all(&out2).unwrap();
+    let items = [("Partition 1 - one", true, 0), ("Partition 1 - one\\hello.txt", false, 5)];
+    let mut ops = MockOps::new();
+    assert_eq!(unpack(&disk, &out2, "", &items, &mut ops), TRUE);
+    assert_eq!(fs::read(out2.join("Partition 1 - one").join("hello.txt")).unwrap(), b"first");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn unpack_one_file_uses_the_panel_name_or_the_rename() {
+    let dir = temp_dir();
+    let img = dir.join("vol.hfs");
+    fs::write(&img, flat_image()).unwrap();
+    let a = archiver();
+    let arc = CString::new(img.to_str().unwrap()).unwrap();
+
+    let go = |name: &str, new_name: Option<&str>, target: &PathBuf| -> BOOL {
+        let mut ops = MockOps::new();
+        let n = CString::new(name).unwrap();
+        let t = CString::new(target.to_str().unwrap()).unwrap();
+        let nn = new_name.map(|s| CString::new(s).unwrap());
+        let mut rn: BOOL = FALSE;
+        unsafe {
+            (a.UnpackOneFile)(
+                null_mut(),
+                ops.as_ops(),
+                arc.as_ptr(),
+                null_mut(),
+                n.as_ptr(),
+                null(),
+                t.as_ptr(),
+                nn.as_ref().map_or(null(), |c| c.as_ptr()),
+                &mut rn,
+            )
+        }
+    };
+
+    let t1 = dir.join("t1");
+    fs::create_dir_all(&t1).unwrap();
+    // Salamander must find the file under the ANSI panel name it knows
+    assert_eq!(go("__ (2).txt", None, &t1), TRUE);
+    assert_eq!(fs::read(t1.join("__ (2).txt")).unwrap(), b"nihon");
+
+    let t2 = dir.join("t2");
+    fs::create_dir_all(&t2).unwrap();
+    assert_eq!(go("hello.txt", Some("_renamed.txt"), &t2), TRUE);
+    assert_eq!(fs::read(t2.join("_renamed.txt")).unwrap(), b"hello hfs+");
+
+    // unknown name -> FALSE with a message
+    let _ = take_messages();
+    assert_eq!(go("nope.txt", None, &t2), FALSE);
+    assert!(take_messages().iter().any(|m| m.contains("not found")));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn cancel_aborts_and_removes_the_partial_file() {
+    let dir = temp_dir();
+    let img = dir.join("vol.hfs");
+    fs::write(&img, flat_image()).unwrap();
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+
+    let mut ops = MockOps::new();
+    ops.cancel_after = Some(1000);
+    assert_eq!(unpack(&img, &out, "", &[("big.bin", false, 600_000), ("hello.txt", false, 10)], &mut ops), FALSE);
+    assert!(!out.join("big.bin").exists(), "partial file must be removed");
+    assert!(!out.join("hello.txt").exists(), "nothing after the cancel");
+    assert_eq!(ops.closed, 1);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn overwrite_question_is_asked_once_and_honoured() {
+    let dir = temp_dir();
+    let img = dir.join("vol.hfs");
+    fs::write(&img, flat_image()).unwrap();
+    let items = [("hello.txt", false, 10)];
+
+    for (answer, expect_ok, expect_content) in
+        [(Answer::No, TRUE, &b"old"[..]), (Answer::Yes, TRUE, &b"hello hfs+"[..]), (Answer::Cancel, FALSE, &b"old"[..])]
+    {
+        let out = temp_dir();
+        fs::write(out.join("hello.txt"), b"old").unwrap();
+        set_answer(answer);
+        let _ = take_messages();
+        let mut ops = MockOps::new();
+        assert_eq!(unpack(&img, &out, "", &items, &mut ops), expect_ok, "{answer:?}");
+        assert_eq!(fs::read(out.join("hello.txt")).unwrap(), expect_content, "{answer:?}");
+        assert_eq!(take_messages().iter().filter(|m| m.contains("already exists")).count(), 1);
+        fs::remove_dir_all(&out).unwrap();
+    }
+    set_answer(Answer::Yes);
+    fs::remove_dir_all(&dir).unwrap();
+}

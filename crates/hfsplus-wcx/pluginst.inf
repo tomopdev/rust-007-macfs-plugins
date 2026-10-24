@@ -1,0 +1,6 @@
+[plugininstall]
+description=HFS+ / HFSX volumes (read-only): disk images, GPT/APM/MBR disks, raw partitions via .hfsdev
+type=wcx
+file=hfsplus_wcx.wcx
+defaultdir=HfsPlusWcx
+defaultextension=hfsdev

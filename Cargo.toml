@@ -1,0 +1,30 @@
+# macfs-plugins – pluginy pro souborové manažery (Total Commander, Altap/Open Salamander) s read-only přístupem k souborovým systémům macOS. Aktuálně HFS+/HFSX, další přibudou.
+[workspace]
+resolver = "3"
+members = ["crates/macfs-core", "crates/hfsplus-wcx", "crates/hfsplus-spl"]
+exclude = ["vendor/hfsplus"] # upstream crate s lokálními patchi (viz vendor/hfsplus/PATCHES.md), není členem workspace
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+hfsplus = { path = "vendor/hfsplus", version = "=0.4.0" }
+unicode-normalization = "0.1"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Time",
+] }
+macfs-core = { path = "crates/macfs-core" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "unwind" # MUSÍ zůstat "unwind": exportované funkce pluginů používají catch_unwind, aby chyba nikdy nesrazila hostitelskou aplikaci (panic unikající skrz extern "system" by proces ukončil).

@@ -1,0 +1,34 @@
+# Rust build
+/target
+
+# zálohy co dělá rustfmt
+**/*.rs.bk
+
+# zamykací soubor - pro APLIKACI ho nech verzovaný, pro KNIHOVNU ho ignoruj
+# Pokud je to tvoje moje_aplikace.exe, tenhle řádek SMAŽ / zakomentuj
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*~
+*.pdb
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+
+# env soubory kdyby sis dělal config
+.env
