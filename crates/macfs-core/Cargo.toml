@@ -1,11 +1,15 @@
 [package]
 name = "macfs-core"
-description = "Společné jádro pluginů macfs-plugins: zdroj dat (obraz/disk/DMG), detekce svazků, UDIF (čtení i zápis oddílů), jména a časy"
+description = "Společné jádro pluginů macfs-plugins: zdroj dat (obraz/disk/DMG), detekce svazků, UDIF (čtení i zápis oddílů), instalační balíčky PKG (XAR/PBZX/CPIO), jména a časy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[features]
+# stavitel syntetických balíčků PKG (XAR + PBZX/CPIO) pro testy jádra i pluginů
+testutil = ["dep:pbzx"]
 
 [dependencies]
 apfs.workspace = true
@@ -16,6 +20,9 @@ flate2.workspace = true
 bzip2.workspace = true
 lzfse_rust.workspace = true
 lzma-rust2.workspace = true
+xara.workspace = true
+quick-xml.workspace = true
+pbzx = { workspace = true, optional = true } # jen pro feature testutil
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
@@ -23,3 +30,4 @@ windows-sys.workspace = true
 [dev-dependencies]
 apfs = { workspace = true, features = ["testutil"] }
 hfsplus = { workspace = true, features = ["testutil"] }
+macfs-core = { path = ".", features = ["testutil"] } # testy jádra používají stejný testutil jako pluginy

@@ -1,5 +1,5 @@
-//! Uniform read-only view of one macOS volume, HFS+/HFSX or APFS, so the
-//! plugins do not care which of the two they are walking.
+//! Uniform read-only view of one macOS volume, HFS+/HFSX or APFS (or an installer package, which is shown
+//! like a volume, see [`crate::pkg`]), so the plugins do not care which of them they are walking.
 //!
 //! APFS support is built on the pure-Rust `apfs` crate (vendored, see
 //! `vendor/apfs/PATCHES.md`). That reader has no encryption, no snapshots and no
@@ -16,6 +16,7 @@ use apfs::{ApfsVolume, VolumeInfo};
 use hfsplus::HfsVolume;
 
 use crate::detect::{FsKind, Part};
+use crate::pkg::PkgVolume;
 use crate::source::{DiskSource, Slice};
 use crate::util;
 
@@ -103,6 +104,8 @@ impl From<apfs::ApfsError> for VolumeError {
 enum Fs {
     Hfs(Box<HfsVolume<Slice>>),
     Apfs(Box<ApfsVolume<Slice>>),
+    /// Installer package (XAR) with its virtual files and the payload tree.
+    Pkg(Box<PkgVolume>),
     /// Volume that cannot be read (encrypted, damaged...): only the notice is shown.
     Unreadable,
 }
@@ -222,6 +225,18 @@ impl MacVolume {
         }
     }
 
+    fn pkg(v: PkgVolume) -> Self {
+        MacVolume {
+            fs: Fs::Pkg(Box::new(v)),
+            kind: FsKind::Pkg,
+            name: String::new(),
+            notice: None,
+            notice_listed: false,
+            clone_seen: false,
+            clones_listed: false,
+        }
+    }
+
     fn unreadable(name: String, text: String) -> Self {
         MacVolume {
             fs: Fs::Unreadable,
@@ -284,6 +299,7 @@ impl MacVolume {
                     })
                     .collect()
             }
+            Fs::Pkg(v) => v.list_directory(path)?,
             Fs::Unreadable if is_root(path) => Vec::new(),
             Fs::Unreadable => return Err(VolumeError::NotFound(path.to_string())),
         };
@@ -327,6 +343,7 @@ impl MacVolume {
                 let mut w: &mut dyn Write = out; // `apfs` wants a `&mut W` with a sized `W`
                 Ok(v.read_file_to(path, &mut w)?)
             }
+            Fs::Pkg(v) => v.read_file_to(path, out),
             Fs::Unreadable => Err(VolumeError::NotFound(path.to_string())),
         }
     }
@@ -338,13 +355,14 @@ pub struct OpenedVolume {
     pub vol: MacVolume,
 }
 
-/// Open every volume of one partition: one for HFS+, one per slot for an APFS container.
+/// Open every volume of one partition: one for HFS+ (or a package), one per slot for an APFS container.
 /// APFS volumes that cannot be read (encrypted, sealed, damaged) are still returned, as
 /// [`MacVolume`]s that only show their notice file.
 pub fn open_part(src: &Arc<Mutex<DiskSource>>, part: &Part) -> Result<Vec<MacVolume>, VolumeError> {
     let slice = || Slice::new(src.clone(), part.start, part.len);
     match part.kind {
         FsKind::HfsPlus => Ok(vec![MacVolume::hfs(HfsVolume::open(slice())?)]),
+        FsKind::Pkg => Ok(vec![MacVolume::pkg(PkgVolume::open(src.clone(), part.start, part.len)?)]),
         FsKind::Apfs => {
             let slots = apfs::list_volumes(&mut slice())?;
             if slots.is_empty() {
@@ -388,7 +406,7 @@ pub fn open_all(src: &Arc<Mutex<DiskSource>>, parts: &[Part]) -> Result<Vec<Open
             Ok(vols) => {
                 for (k, vol) in vols.into_iter().enumerate() {
                     let tag = match p.kind {
-                        FsKind::HfsPlus => p.label.clone(),
+                        FsKind::HfsPlus | FsKind::Pkg => p.label.clone(),
                         FsKind::Apfs if !vol.name().is_empty() => vol.name().to_string(),
                         FsKind::Apfs => format!("Volume {}", k + 1),
                     };

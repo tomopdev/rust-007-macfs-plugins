@@ -2,6 +2,7 @@
 //! (HFS+ also inside the classic HFS wrapper), GPT, Apple Partition Map and MBR
 //! disks, UDIF (DMG) images (searched as the virtual disk they describe) and the
 //! `.macfsdev` / `.hfsdev` / `.apfsdev` text files that point at raw devices.
+//! A source that is a XAR archive (macOS installer package, `.pkg`) is recognised as well.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,8 @@ pub enum FsKind {
     HfsPlus,
     /// APFS container (one or more volumes).
     Apfs,
+    /// macOS installer package (XAR archive, `.pkg`): not a volume, but shown like one.
+    Pkg,
 }
 
 /// One HFS+ volume or APFS container found in a source.
@@ -83,16 +86,27 @@ pub fn apfs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Optio
         .then(|| Part { label: label.to_string(), start, len, kind: FsKind::Apfs })
 }
 
+/// Does a XAR archive (flat installer package) start at `start`? (header: magic "xar!", header size, version,
+/// compressed size of the table of contents that has to fit into the source)
+pub fn pkg_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option<Part> {
+    let mut h = [0u8; 28];
+    src.read_exact_at(start, &mut h).ok()?;
+    let (size, version) = (be16(&h, 4), be16(&h, 6));
+    let toc = u64::from_be_bytes(h[8..16].try_into().ok()?);
+    (&h[..4] == b"xar!" && (28..=4096).contains(&size) && version >= 1 && toc > 0 && toc.checked_add(size as u64)? <= len)
+        .then(|| Part { label: label.to_string(), start, len, kind: FsKind::Pkg })
+}
+
 /// HFS+/HFSX volume or APFS container at `start`.
 pub fn fs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option<Part> {
     hfs_at(src, start, len, label).or_else(|| apfs_at(src, start, len, label))
 }
 
-/// All HFS+ volumes and APFS containers of a source. A bare volume at offset 0
+/// All HFS+ volumes and APFS containers of a source. A bare volume (or a XAR installer package) at offset 0
 /// wins; otherwise GPT, then Apple Partition Map, then MBR.
 pub fn find_volumes(src: &mut DiskSource) -> Vec<Part> {
     let total = src.len();
-    if let Some(p) = fs_at(src, 0, total, "") {
+    if let Some(p) = fs_at(src, 0, total, "").or_else(|| pkg_at(src, 0, total, "")) {
         return vec![p];
     }
     let mut parts = gpt(src);

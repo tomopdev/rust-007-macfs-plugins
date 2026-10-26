@@ -1,5 +1,5 @@
-//! Platform-neutral core: opens an image/disk, exposes its HFS+ volumes and APFS
-//! containers as one directory tree and maps names between the three worlds involved:
+//! Platform-neutral core: opens an image/disk, exposes its HFS+ volumes, APFS
+//! containers and installer packages (PKG) as one directory tree and maps names between the three worlds involved:
 //!
 //! * `hfs`  – the raw on-disk name (needed to address the item in the volume),
 //! * `disp` – what the Salamander panel shows: NFC, Windows-safe, and
@@ -40,7 +40,7 @@ impl fmt::Display for OpenError {
             OpenError::Io(e) => write!(f, "cannot open the source: {e} (raw disks need Salamander run as administrator)"),
             OpenError::Config(m) => write!(f, "invalid .macfsdev / .hfsdev / .apfsdev file: {m}"),
             OpenError::Unsupported(m) => write!(f, "{m}"),
-            OpenError::NoVolume => write!(f, "no HFS+/HFSX volume or APFS container found (also looked inside a DMG)"),
+            OpenError::NoVolume => write!(f, "no HFS+/HFSX volume, APFS container or installer package (PKG) found (also looked inside a DMG)"),
             OpenError::Fs(e) => write!(f, "damaged volume: {e}"),
         }
     }

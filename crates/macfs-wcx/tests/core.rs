@@ -261,3 +261,42 @@ fn encrypted_dmg_is_reported_as_unknown_format() {
     let e = Archive::open(&dmg).err().expect("must fail");
     assert_eq!(e.code(), E_UNKNOWN_FORMAT);
 }
+
+#[test]
+fn pkg_lists_and_extracts() {
+    use macfs_core::testutil::{SAMPLE_BIN, sample_pkg};
+    let dir = temp_dir();
+    let pkg = dir.join("tool.pkg");
+    fs::write(&pkg, sample_pkg(&vec![9u8; 40_000])).unwrap();
+
+    unsafe {
+        assert_eq!(CanYouHandleThisFileW(wide(&pkg).as_ptr()), 1);
+    }
+    let mut a = Archive::open(&pkg).unwrap();
+    let items = list(&mut a);
+    let names: Vec<&str> = items.iter().map(|i| i.0.as_str()).collect();
+    for want in [
+        "!XAR-TOC.xml",
+        "!PKG-COMPONENTS.txt",
+        "Installed Files",
+        "Installed Files\\!CPIO-INDEX.txt",
+        "Installed Files\\bin\\tool",
+        "Installed Files\\share\\a_b_.txt",
+        "Tool.pkg\\Payload",
+    ] {
+        assert!(names.contains(&want), "{want} missing in {names:?}");
+    }
+    assert_eq!(items.iter().find(|i| i.0 == "Installed Files\\share\\doc\\tool\\big.bin").unwrap().2, 40_000);
+
+    let out = dir.join("out");
+    let mut a = Archive::open(&pkg).unwrap();
+    while let Some(e) = a.next_header().unwrap() {
+        // Total Commander passes Windows paths; map the separator for the Linux test run
+        assert_eq!(a.process(PK_EXTRACT, Some(&out.join(e.disp.replace('\\', "/")))), E_OK, "{}", e.disp);
+    }
+    assert_eq!(fs::read(out.join("Installed Files").join("bin").join("tool")).unwrap(), SAMPLE_BIN);
+    assert_eq!(fs::read(out.join("Installed Files").join("share").join("doc").join("tool").join("big.bin")).unwrap(), vec![9u8; 40_000]);
+    assert!(fs::read_to_string(out.join("!PKG-COMPONENTS.txt")).unwrap().contains("com.example.tool"));
+    assert!(fs::read_to_string(out.join("!XAR-TOC.xml")).unwrap().contains("<toc>"));
+    fs::remove_dir_all(&dir).unwrap();
+}

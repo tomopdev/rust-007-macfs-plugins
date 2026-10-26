@@ -135,6 +135,13 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// `YYYY-MM-DD HH:MM:SS` (UTC) of a unix time, for the text listings.
+pub fn format_utc(unix: i64) -> String {
+    let (y, m, d) = civil_from_days(unix.div_euclid(86_400));
+    let s = unix.rem_euclid(86_400);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
 /// Pack a calendar time into the DOS `date<<16 | time` format Total Commander wants.
 /// Years outside 1980..=2107 are clamped.
 pub fn pack_dos(year: i64, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> i32 {

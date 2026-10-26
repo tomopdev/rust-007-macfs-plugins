@@ -1,5 +1,5 @@
 //! Total Commander WCX (packer) plugin for macOS file systems and archives: HFS+/HFSX volumes and APFS
-//! containers, also inside UDIF disk images (DMG). Everything is read-only.
+//! containers, also inside UDIF disk images (DMG), and installer packages (PKG). Everything is read-only.
 //!
 //! Built as a 64-bit DLL and renamed to `*.wcx64`. Only the Unicode (`...W`)
 //! entry points are implemented; the ANSI ones exist solely so Total Commander

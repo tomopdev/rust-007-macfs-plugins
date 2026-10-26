@@ -1,4 +1,4 @@
-# macfs-spl – HFS+/HFSX, APFS a DMG plugin pro Altap Salamander 4.0 / Open Salamander 5.0 (64 bit, jen čtení)
+# macfs-spl – HFS+/HFSX, APFS, DMG a PKG plugin pro Altap Salamander 4.0 / Open Salamander 5.0 (64 bit, jen čtení)
 
 Součást workspace [macfs-plugins](../../README.md).
 
@@ -24,7 +24,7 @@ bajtů). „Unicode“ je tedy jen na straně hostitelské aplikace, ne v rozhra
 
 ## Co plugin dělá a nedělá
 
-* Registruje se jako **panel archiver (jen prohlížení)** pro přípony `hfs`, `apfs`, `dmg`, `macfsdev`, `hfsdev` a `apfsdev`.
+* Registruje se jako **panel archiver (jen prohlížení)** pro přípony `hfs`, `apfs`, `dmg`, `pkg`, `macfsdev`, `hfsdev` a `apfsdev`.
   Salamander pozná archivy **jen podle přípony** (žádná detekce obsahem). Další přípony (`img`,
   `raw` …) přidej v *Options → Configuration → Archives Associations in Panels*.
   Pozor: `iso`/`img`/`dmg` mívá přiřazené plugin UnISO.
@@ -73,6 +73,32 @@ velký DMG nerozbaluje celý a výpis je rychlý. Kontrolní součty (CRC32) se 
 * **Nepodporované:** šifrovaný DMG (AES) a `.sparseimage` (plugin to při otevření oznámí), segmentované `.dmgpart`,
   starý ADC a NDIF/Disk Copy. DMG bez UDIF trailer (holý obraz s příponou `.dmg`) se čte jako obyčejný obraz.
 * Obrazy `.sparsebundle` jsou složky, ne soubory; otevři v nich jednotlivé bands až po převodu na DMG/raw.
+
+## PKG (instalační balíčky macOS)
+
+Plugin otevře i **instalační balíčky `.pkg`** (flat packages = archiv XAR; poznají se podle obsahu, ne podle přípony;
+funguje i pro `.xar`). Zobrazí se:
+
+* položky archivu XAR tak, jak jsou uložené (`Distribution`, `Resources\`, u product balíčků složka `Název.pkg` s `PackageInfo`,
+  `Bom`, `Scripts`, `Payload`),
+* `!XAR-TOC.xml` – dekomprimovaný XAR TOC,
+* `!PKG-COMPONENTS.txt` – metadata balíčku a komponent (titul a produkt z `Distribution`, u komponent identifikátor, verze,
+  install location, počet souborů a velikost, skripty, bundly),
+* složka **`Installed Files`** – soubory z payloadů komponent (při víc komponentách podsložka na komponentu) a v jejím
+  kořeni `!CPIO-INDEX.txt` – výpis CPIO jako `cpio -tv` (práva, uid/gid, velikost, datum, cíle symlinků, hard linky).
+  Cesty jsou relativní k *install location* komponenty (ta je v indexu a v `!PKG-COMPONENTS.txt`).
+
+Payload `pbzx` (XZ bloky) se čte líně přes tabulku bloků: výpis dekóduje jen bloky s hlavičkami CPIO a rozbalení souboru
+jen jeho bloky, takže se velký payload nerozbaluje do paměti (crate `pbzx` dekóduje celý payload do paměti; proto jen XAR
+parsuje crate [`xara`](https://crates.io/crates/xara) a PBZX/CPIO řeší `macfs-core`). Čte se i holé CPIO (odc/newc/crc) a starší
+gzip/bzip2/xz CPIO – ty se musí jednou dekódovat do anonymní dočasné složky (`%TEMP%`, smaže se při zavření).
+Hard linky (data u jednoho z odkazů) se vyhodnocují; symlink se rozbalí jako textový soubor s cílem.
+Payload, který nejde přečíst, nepoloží balíček: ve složce je místo něj `!PAYLOAD-ERROR.txt` s důvodem.
+
+* Jen **čtení**; kontrolní součty XAR/BOM se neověřují, datum položek XAR (v TOC) se nezobrazuje (u payloadu ano).
+* Nepodporované kódování položky XAR (jiné než raw/gzip/zlib/bzip2/xz) se hlásí chybou u dané položky.
+* Archiv `Scripts` se zobrazuje jako soubor (pbzx/gzip CPIO), nerozbaluje se do složky.
+* Syntetické balíčky z testů vznikají podle specifikace, **ne** z reálného balíčku z macOS – první skutečný `.pkg` vyzkoušej ručně.
 
 ## Build
 

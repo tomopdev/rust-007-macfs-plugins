@@ -1,5 +1,5 @@
 //! Platform-neutral plugin core: opens volumes (HFS+/HFSX and APFS, also inside UDIF/DMG
-//! images), walks them lazily one header at a time (what `ReadHeaderExW` needs) and extracts
+//! images) and installer packages (PKG), walks them lazily one header at a time (what `ReadHeaderExW` needs) and extracts
 //! files (`ProcessFileW`). Read-only.
 
 use std::collections::VecDeque;
@@ -41,7 +41,7 @@ pub enum OpenError {
     Config(String),
     /// A container that is recognised but not supported (encrypted DMG...).
     Unsupported(String),
-    /// Nothing that looks like HFS+/HFSX, APFS or a UDIF container was found.
+    /// Nothing that looks like HFS+/HFSX, APFS, a UDIF container or an installer package (PKG) was found.
     NoVolume,
     /// A volume was found but could not be parsed.
     Fs(VolumeError),

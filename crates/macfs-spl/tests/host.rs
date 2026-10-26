@@ -443,7 +443,7 @@ fn entry_points_and_connect() {
         let obj = unsafe { SalamanderPluginEntry(&mut *e as *mut MockEntry as *mut Entry) };
         assert!(!obj.is_null());
         assert_eq!(e.functions, FUNCTION_PANELARCHIVERVIEW);
-        assert_eq!(e.extensions, "hfs;apfs;dmg;macfsdev;hfsdev;apfsdev");
+        assert_eq!(e.extensions, "hfs;apfs;dmg;pkg;macfsdev;hfsdev;apfsdev");
         assert!(e.fs_name_null);
         assert!(e.name.contains("HFS+"));
 
@@ -451,7 +451,7 @@ fn entry_points_and_connect() {
             let pvt = &*(*(obj as *mut Obj<PluginVtbl>)).vtbl;
             let mut conn = MockConnect { vtbl: &CONNECT_VTBL, calls: vec![] };
             (pvt.Connect)(obj, null_mut(), &mut conn as *mut MockConnect as *mut Connect);
-            assert_eq!(conn.calls, vec![("hfs;apfs;dmg;macfsdev;hfsdev;apfsdev".to_string(), FALSE, FALSE)]);
+            assert_eq!(conn.calls, vec![("hfs;apfs;dmg;pkg;macfsdev;hfsdev;apfsdev".to_string(), FALSE, FALSE)]);
             assert_eq!(
                 (pvt.GetInterfaceForArchiver)(obj),
                 &macfs_spl::plugin::ARCHIVER_OBJ as *const Obj<ArchiverVtbl> as *mut c_void
@@ -802,5 +802,42 @@ fn apfs_single_volume_sits_in_the_root() {
     let (r, _) = list(&empty);
     assert_eq!(r, FALSE);
     assert!(take_messages().iter().any(|m| m.contains("no volume")));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// PKG (installer package)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pkg_lists_toc_metadata_and_installed_files_and_unpacks() {
+    use macfs_core::testutil::sample_pkg;
+    let dir = temp_dir();
+    let pkg = dir.join("tool.pkg");
+    fs::write(&pkg, sample_pkg(&vec![7u8; 30_000])).unwrap();
+
+    let (r, d) = list(&pkg);
+    assert_eq!(r, TRUE);
+    d.find("!XAR-TOC.xml");
+    d.find("!PKG-COMPONENTS.txt");
+    assert!(d.find("Installed Files").is_dir);
+    d.find("PackageInfo");
+    assert_eq!(d.find("Payload").parent, "Tool.pkg");
+    assert_eq!(d.find("!CPIO-INDEX.txt").parent, "Installed Files");
+    assert_eq!(d.find("tool-link").parent, "Installed Files\\bin");
+    assert_eq!(d.find("big.bin").size, 30_000);
+    d.find("a_b_.txt"); // illegal characters replaced
+
+    // unpack a payload file and the CPIO index below the folder "Installed Files"
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let items = [("share\\doc\\tool\\big.bin", false, 30_000), ("Installed Files\\!CPIO-INDEX.txt", false, 100)];
+    let mut ops = MockOps::new();
+    assert_eq!(unpack(&pkg, &out, "Installed Files", &items[..1], &mut ops), TRUE);
+    assert_eq!(fs::read(out.join("share").join("doc").join("tool").join("big.bin")).unwrap(), vec![7u8; 30_000]);
+    let mut ops = MockOps::new();
+    assert_eq!(unpack(&pkg, &out, "", &items[1..], &mut ops), TRUE);
+    let idx = fs::read_to_string(out.join("Installed Files").join("!CPIO-INDEX.txt")).unwrap();
+    assert!(idx.contains("bin/tool-link -> tool"), "{idx}");
     fs::remove_dir_all(&dir).unwrap();
 }

@@ -18,6 +18,7 @@ macfs-core.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
+macfs-core = { workspace = true, features = ["testutil"] }
 udif.workspace = true
 apfs = { workspace = true, features = ["testutil"] }
 hfsplus = { workspace = true, features = ["testutil"] }

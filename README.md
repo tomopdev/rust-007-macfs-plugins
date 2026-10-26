@@ -2,13 +2,13 @@
 
 Rust workspace (edition 2024) s pluginy, které umožní prohlížet a rozbalovat svazky macOS ve Windows
 správcích souborů. Aktuálně **HFS+/HFSX** (nad crate [`hfsplus` 0.4.0](https://crates.io/crates/hfsplus)
-s lokálními patchi) a **APFS** (nad crate [`apfs` 0.4.1](https://crates.io/crates/apfs), bez šifrování, snapshotů a vztahů klonů – ty plugin jen hlásí); **obrazy DMG (UDIF)** s HFS+/APFS uvnitř; další souborové systémy macOS přibudou v dalších fázích. Vše je jen pro čtení (UDIF kontejner ani souborové systémy v něm se nezapisují).
+s lokálními patchi) a **APFS** (nad crate [`apfs` 0.4.1](https://crates.io/crates/apfs), bez šifrování, snapshotů a vztahů klonů – ty plugin jen hlásí); **obrazy DMG (UDIF)** s HFS+/APFS uvnitř; **instalační balíčky PKG** (XAR TOC, metadata komponent, `Installed Files` z payloadu PBZX/CPIO); další souborové systémy macOS přibudou v dalších fázích. Vše je jen pro čtení (UDIF kontejner ani souborové systémy v něm se nezapisují).
 
 ## Struktura
 
 | Cesta | Obsah |
 |---|---|
-| `crates/macfs-core` | společné jádro: zdroj dat (obraz/raw disk), kontejner UDIF (DMG: líné čtení dekomprimovaného virtuálního disku nad crate [`udif` 0.4.2](https://crates.io/crates/udif)), detekce svazků (holý svazek/DMG/GPT/APM/MBR/`.macfsdev`/`.hfsdev`/`.apfsdev`), jednotný pohled na svazek HFS+/APFS, hlášení nepodporovaných featur APFS, převody jmen a časů |
+| `crates/macfs-core` | společné jádro: zdroj dat (obraz/raw disk), kontejner UDIF (DMG: líné čtení dekomprimovaného virtuálního disku nad crate [`udif` 0.4.2](https://crates.io/crates/udif)), detekce svazků (holý svazek/DMG/GPT/APM/MBR/`.macfsdev`/`.hfsdev`/`.apfsdev`), jednotný pohled na svazek HFS+/APFS, hlášení nepodporovaných featur APFS, balíčky PKG (`pkg`/`pbzx`/`cpio`: XAR přes crate [`xara`](https://crates.io/crates/xara), streamovaný PBZX a CPIO), převody jmen a časů |
 | `crates/macfs-wcx` | plugin WCX pro Total Commander 11.x (64 bit) → [README](crates/macfs-wcx/README.md) |
 | `crates/macfs-spl` | plugin `.spl` pro Altap Salamander 4.0 / Open Salamander 5.0 (64 bit) → [README](crates/macfs-spl/README.md) |
 | `vendor/apfs` | crate `apfs` 0.4.1 s lokálními úpravami ([PATCHES.md](vendor/apfs/PATCHES.md)) |
