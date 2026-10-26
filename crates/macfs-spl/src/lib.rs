@@ -13,7 +13,7 @@ pub mod spl;
 pub mod win;
 
 // sdílené moduly z macfs-core (zpřístupněné pod původními cestami)
-pub use macfs_core::{detect, source, util, volume};
+pub use macfs_core::{detect, source, udif, util, volume};
 
 use std::ffi::{c_int, c_void};
 

@@ -6,15 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use hfsplus::testutil::HfsPlusImageBuilder;
-use hfsplus_wcx::archive::Archive;
-use hfsplus_wcx::ffi::*;
-use hfsplus_wcx::*;
+use macfs_wcx::archive::Archive;
+use macfs_wcx::ffi::*;
+use macfs_wcx::*;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn temp_dir() -> PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "hfsplus-wcx-test-{}-{}",
+        "macfs-wcx-test-{}-{}",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::SeqCst)
     ));
@@ -113,7 +113,7 @@ fn gpt_disks_512_and_4096() {
 }
 
 #[test]
-fn hfsdev_link_with_offset_and_partition() {
+fn devlink_with_offset_and_partition() {
     let dir = temp_dir();
     let disk = dir.join("disk.img");
     fs::write(&disk, gpt_disk(&volume_image(), 512)).unwrap();
@@ -226,4 +226,38 @@ fn progress_callback_can_abort() {
     }
     assert!(aborted);
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn dmg_container_lists_and_extracts() {
+    let dir = temp_dir();
+    let dmg = dir.join("vol.dmg");
+    let mut w = ::udif::DmgWriter::create(&dmg).unwrap().compression(::udif::CompressionMethod::Bzip2);
+    w.add_partition("disk image (Apple_HFSX : 0)", &volume_image()).unwrap();
+    w.finish().unwrap();
+
+    let mut a = Archive::open(&dmg).unwrap();
+    let items = list(&mut a);
+    assert_eq!(items.iter().find(|i| i.0 == "big.bin").unwrap().2, 600_000);
+    assert!(items.iter().any(|i| i.0 == "hello.txt"));
+
+    let mut a = Archive::open(&dmg).unwrap();
+    while let Some(e) = a.next_header().unwrap() {
+        if e.disp == "hello.txt" {
+            let out = dir.join("hello.out");
+            assert_eq!(a.process(PK_EXTRACT, Some(&out)), E_OK);
+            assert_eq!(fs::read(&out).unwrap(), b"hello hfs+");
+        }
+    }
+}
+
+#[test]
+fn encrypted_dmg_is_reported_as_unknown_format() {
+    let dir = temp_dir();
+    let dmg = dir.join("secret.dmg");
+    let mut data = b"encrcdsa".to_vec();
+    data.resize(8192, 1);
+    fs::write(&dmg, data).unwrap();
+    let e = Archive::open(&dmg).err().expect("must fail");
+    assert_eq!(e.code(), E_UNKNOWN_FORMAT);
 }

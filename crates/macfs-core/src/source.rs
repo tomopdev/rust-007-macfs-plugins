@@ -1,5 +1,6 @@
-//! Byte source (image file or raw disk/partition device) with a sector-aligned
-//! read cache, plus a bounded `Read + Seek` window used as the HFS+ volume.
+//! Byte source (image file, raw disk/partition device or a UDIF/DMG image seen as one
+//! virtual disk) with a sector-aligned read cache, plus a bounded `Read + Seek` window
+//! used as the HFS+ / APFS volume.
 //!
 //! Raw Windows devices (`\\.\PhysicalDriveN`, `\\.\X:`) only accept reads at
 //! sector-aligned offsets and lengths. Everything therefore goes through
@@ -12,17 +13,27 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::udif::{UdifDisk, UdifImage};
+
 const CHUNK: u64 = 128 * 1024;
 const MAX_CHUNKS: usize = 128; // 16 MiB of cache
 
+enum Backend {
+    /// Image file or raw device.
+    File(File),
+    /// UDIF (DMG) image: the decompressed virtual disk, decoded block by block on demand.
+    Udif(Box<UdifDisk>),
+}
+
 pub struct DiskSource {
-    file: File,
+    backend: Backend,
     len: u64,
     tick: u64,
     cache: HashMap<u64, (Vec<u8>, u64)>,
 }
 
 impl DiskSource {
+    /// Plain image file or raw device (no container format is looked for; see `detect::open_source`).
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = open_read_shared(path)?;
         let mut len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -32,7 +43,26 @@ impl DiskSource {
         if len == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "source is empty or its size is unknown"));
         }
-        Ok(DiskSource { file, len, tick: 0, cache: HashMap::new() })
+        Ok(DiskSource { backend: Backend::File(file), len, tick: 0, cache: HashMap::new() })
+    }
+
+    /// UDIF image as one virtual disk: all its partitions at their sector positions
+    /// (a partition map inside the image, if any, therefore works like on a real disk).
+    pub fn open_udif(image: Arc<UdifImage>) -> io::Result<Self> {
+        let disk = UdifDisk::open(image)?;
+        let len = disk.len();
+        if len == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "the disk image is empty"));
+        }
+        Ok(DiskSource { backend: Backend::Udif(Box::new(disk)), len, tick: 0, cache: HashMap::new() })
+    }
+
+    /// The UDIF image behind this source (`None` for plain files and devices).
+    pub fn udif(&self) -> Option<&Arc<UdifImage>> {
+        match &self.backend {
+            Backend::Udif(d) => Some(d.image()),
+            Backend::File(_) => None,
+        }
     }
 
     pub fn len(&self) -> u64 {
@@ -76,15 +106,21 @@ impl DiskSource {
             let start = idx * CHUNK;
             let want = (self.len - start).min(CHUNK) as usize;
             let mut data = vec![0u8; want];
-            self.file.seek(SeekFrom::Start(start))?;
-            let mut got = 0;
-            while got < want {
-                let n = self.file.read(&mut data[got..])?;
-                if n == 0 {
-                    break;
+            let got = match &mut self.backend {
+                Backend::File(file) => {
+                    file.seek(SeekFrom::Start(start))?;
+                    let mut got = 0;
+                    while got < want {
+                        let n = file.read(&mut data[got..])?;
+                        if n == 0 {
+                            break;
+                        }
+                        got += n;
+                    }
+                    got
                 }
-                got += n;
-            }
+                Backend::Udif(disk) => disk.read_at(start, &mut data)?,
+            };
             data.truncate(got);
             if self.cache.len() >= MAX_CHUNKS {
                 if let Some(oldest) = self.cache.iter().min_by_key(|(_, v)| v.1).map(|(k, _)| *k) {
@@ -147,14 +183,14 @@ impl Seek for Slice {
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn open_read_shared(path: &Path) -> io::Result<File> {
+pub(crate) fn open_read_shared(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
     OpenOptions::new().read(true).share_mode(7).open(path)
 }
 
 #[cfg(not(windows))]
-fn open_read_shared(path: &Path) -> io::Result<File> {
+pub(crate) fn open_read_shared(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).open(path)
 }
 

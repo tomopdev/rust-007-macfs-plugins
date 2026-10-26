@@ -14,11 +14,11 @@ use crate::spl::*;
 use crate::util;
 use crate::win::{self, Answer, Kind};
 
-pub const PLUGIN_NAME: &str = "HFS+ / APFS (read-only)";
-const ABOUT_TEXT: &str = "HFS+ / HFSX / APFS read-only archiver plugin\n\nWritten in Rust on top of the hfsplus 0.4.0 and \
+pub const PLUGIN_NAME: &str = "MacFS (HFS+ / APFS / DMG)";
+const ABOUT_TEXT: &str = "MacFS: HFS+ / HFSX / APFS and Apple DMG (UDIF) read-only archiver plugin\n\nWritten in Rust on top of the hfsplus 0.4.0 and \
 apfs 0.4.1 crates (including decmpfs transparent compression).\n\nAPFS: encrypted volumes, snapshots and the clone \
 relationship are not supported yet; the plugin reports them in a '!APFS-NOTICE.txt' file inside the volume.\n\nOpens disk \
-images and raw partitions; use a *.hfsdev / *.apfsdev link file for physical disks (see README).";
+images (also inside DMG), and raw partitions; use a *.macfsdev link file for physical disks (see README).";
 
 /// `CSalamanderGeneralAbstract*` received in `SalamanderPluginEntry`.
 pub static GENERAL: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
@@ -120,7 +120,7 @@ unsafe extern "system" fn p_connect(_this: *mut c_void, _parent: HWND, salamande
         }
         // Salamander recognises archives by extension only (no content detection).
         // SAFETY: valid host object; AddPanelArchiver is slot 2.
-        unsafe { ((*(*salamander).vtbl).AddPanelArchiver)(salamander, c"hfs;apfs;hfsdev;apfsdev".as_ptr(), FALSE, FALSE) }
+        unsafe { ((*(*salamander).vtbl).AddPanelArchiver)(salamander, c"hfs;apfs;dmg;macfsdev;hfsdev;apfsdev".as_ptr(), FALSE, FALSE) }
     })
 }
 unsafe extern "system" fn p_release_plugin_data(_this: *mut c_void, _pd: *mut c_void) {}
@@ -170,7 +170,7 @@ fn open_container(arc: &str, parent: HWND) -> Option<Container> {
         Err(e) => {
             let hint = if matches!(e, OpenError::NoVolume) {
                 "\n\nSalamander opens files by extension; the file must contain an HFS+/HFSX volume or an APFS \
-                 container (directly, or on a GPT / Apple partition map / MBR disk)."
+                 container (directly, in a DMG, or on a GPT / Apple partition map / MBR disk)."
             } else {
                 ""
             };
@@ -670,13 +670,13 @@ pub unsafe fn plugin_entry(entry: *mut Entry) -> *mut c_void {
             GENERAL.store((vt.GetSalamanderGeneral)(entry), Ordering::Release);
             let ok = (vt.SetBasicPluginData)(
                 entry,
-                c"HFS+ / APFS (read-only)".as_ptr(),
+                c"MacFS (HFS+ / APFS / DMG)".as_ptr(),
                 FUNCTION_PANELARCHIVERVIEW,
-                c"0.1.0".as_ptr(),
-                c"MIT licensed; hfsplus and apfs crates by Dil4rd".as_ptr(),
-                c"Opens HFS+/HFSX and APFS disk images and partitions (read-only), including decmpfs compressed files.".as_ptr(),
-                c"HFSPLUS".as_ptr(),
-                c"hfs;apfs;hfsdev;apfsdev".as_ptr(),
+                c"0.1.3".as_ptr(),
+                c"MIT licensed; hfsplus, apfs and udif crates by Dil4rd".as_ptr(),
+                c"Opens HFS+/HFSX and APFS disk images, DMG images and partitions (read-only), including decmpfs compressed files.".as_ptr(),
+                c"MACFS".as_ptr(),
+                c"hfs;apfs;dmg;macfsdev;hfsdev;apfsdev".as_ptr(),
                 null(),
             );
             if ok == 0 {

@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use apfs::testutil::ApfsImageBuilder;
-use hfsplus_wcx::archive::{Archive, OpenError};
-use hfsplus_wcx::ffi::*;
-use hfsplus_wcx::*;
+use macfs_wcx::archive::{Archive, OpenError};
+use macfs_wcx::ffi::*;
+use macfs_wcx::*;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn temp_dir() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("hfsplus-wcx-apfs-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst)));
+    let d = std::env::temp_dir().join(format!("macfs-wcx-apfs-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst)));
     fs::create_dir_all(&d).unwrap();
     d
 }

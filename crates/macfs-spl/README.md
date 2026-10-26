@@ -1,10 +1,10 @@
-# hfsplus-spl – HFS+/HFSX a APFS plugin pro Altap Salamander 4.0 / Open Salamander 5.0 (64 bit, jen čtení)
+# macfs-spl – HFS+/HFSX, APFS a DMG plugin pro Altap Salamander 4.0 / Open Salamander 5.0 (64 bit, jen čtení)
 
 Součást workspace [macfs-plugins](../../README.md).
 
 Plugin `.spl` v Rustu (edition 2024) nad crate [`hfsplus` 0.4.0](https://crates.io/crates/hfsplus)
 (včetně decmpfs komprese: zlib, LZVN, LZFSE). Funkčně odpovídá WCX pluginu pro Total Commander:
-obrazy disků, GPT / Apple Partition Map / MBR / HFS wrapper, `*.hfsdev` pro skutečné disky.
+obrazy disků, GPT / Apple Partition Map / MBR / HFS wrapper, `*.macfsdev` pro skutečné disky.
 
 ## Důležité: jména souborů jsou v API Salamanderu ANSI
 
@@ -24,9 +24,9 @@ bajtů). „Unicode“ je tedy jen na straně hostitelské aplikace, ne v rozhra
 
 ## Co plugin dělá a nedělá
 
-* Registruje se jako **panel archiver (jen prohlížení)** pro přípony `hfs`, `apfs`, `hfsdev` a `apfsdev`.
+* Registruje se jako **panel archiver (jen prohlížení)** pro přípony `hfs`, `apfs`, `dmg`, `macfsdev`, `hfsdev` a `apfsdev`.
   Salamander pozná archivy **jen podle přípony** (žádná detekce obsahem). Další přípony (`img`,
-  `raw`, `dmg` po převodu na raw …) přidej v *Options → Configuration → Archives Associations in Panels*.
+  `raw` …) přidej v *Options → Configuration → Archives Associations in Panels*.
   Pozor: `iso`/`img`/`dmg` mívá přiřazené plugin UnISO.
 * Jeden HFS+ oddíl se zobrazí rovnou v kořeni, více oddílů jako složky `Partition N - název`.
 * Rozbalení: průběhový dialog s tlačítkem Storno (nedokončený soubor se smaže), zachová datum
@@ -36,13 +36,12 @@ bajtů). „Unicode“ je tedy jen na straně hostitelské aplikace, ne v rozhra
 * Není implementováno: zápis/mazání, „custom unpacker“ (Alt+F9), konfigurační dialog, vlastní sloupce,
   lokalizace (hlášky jsou anglicky).
 * Stejná omezení jako WCX verze: komprimované soubory se rozbalují celé do paměti, hard linky
-  (Time Machine) se zobrazí jako prázdné soubory, žurnál se nepřehrává, CoreStorage/DMG
-  (UDIF) nejsou podporované, symlink se rozbalí jako textový soubor s cílem.
+  (Time Machine) se zobrazí jako prázdné soubory, žurnál se nepřehrává, CoreStorage a šifrované DMG nejsou podporované, symlink se rozbalí jako textový soubor s cílem.
 
 
 ## APFS
 
-Kromě HFS+/HFSX plugin otevře i **kontejnery APFS** (obraz, GPT/APM/MBR disk, `.apfsdev`/`.hfsdev`).
+Kromě HFS+/HFSX plugin otevře i **kontejnery APFS** (obraz, GPT/APM/MBR disk, `.macfsdev`/`.apfsdev`/`.hfsdev`).
 Používá vendorovaný čistě rustový crate [`apfs` 0.4.1](https://crates.io/crates/apfs) (`vendor/apfs`,
 lokální úpravy v `vendor/apfs/PATCHES.md`: výběr svazku, příznaky svazku, detekce klonů).
 Kontejner s víc svazky (System, Data, Preboot, Recovery, VM …) se zobrazí jako složky
@@ -62,6 +61,19 @@ virtuálními textovými soubory, které se v seznamu chovají jako obyčejné s
 Syntetické APFS obrazy z testů vznikají podle specifikace Applu, **ne** z obrazu zapsaného macOS –
 první skutečný obraz vyzkoušej ručně (výpis, rozbalení, soubor s diakritikou).
 
+## DMG (UDIF)
+
+Obrazy Apple DMG se otevírají jako ostatní obrazy; plugin je pozná podle trailer „koly“ (ne podle přípony)
+a čte je jako jeden virtuální disk: oddíly leží na svých sektorech, takže GPT / Apple Partition Map uvnitř
+fungují stejně jako na skutečném disku (jeden svazek se zobrazí v kořeni, víc jako složky `Partition N - název`).
+Podporované bloky: raw, zlib (UDZO), bzip2 (UDBZ), LZFSE (ULFO), XZ (ULMO). Bloky se dekódují až při čtení, takže se
+velký DMG nerozbaluje celý a výpis je rychlý. Kontrolní součty (CRC32) se při prohlížení neověřují.
+
+* **Jen čtení.** DMG ani HFS+/APFS uvnitř se nezapisují; plugin nové kontejnery nevytváří.
+* **Nepodporované:** šifrovaný DMG (AES) a `.sparseimage` (plugin to při otevření oznámí), segmentované `.dmgpart`,
+  starý ADC a NDIF/Disk Copy. DMG bez UDIF trailer (holý obraz s příponou `.dmg`) se čte jako obyčejný obraz.
+* Obrazy `.sparsebundle` jsou složky, ne soubory; otevři v nich jednotlivé bands až po převodu na DMG/raw.
+
 ## Build
 
 Rust ≥ 1.97, toolchain `stable-x86_64-pc-windows-msvc`, Visual Studio Build Tools (C++).
@@ -69,12 +81,12 @@ Rust ≥ 1.97, toolchain `stable-x86_64-pc-windows-msvc`, Visual Studio Build To
 Z kořene workspace:
 
 ```powershell
-.\build.ps1 -Plugin spl           # testy + release build -> dist\hfsplus.spl
+.\build.ps1 -Plugin spl           # testy + release build -> dist\macfs.spl
 ```
 
-Ručně: `cargo build --release --target x86_64-pc-windows-msvc -p hfsplus-spl` a soubor
-`target\x86_64-pc-windows-msvc\release\hfsplus_spl.dll` přejmenuj na `hfsplus.spl`.
-MSVC runtime je slinkovaný staticky. Kontrola exportů: `dumpbin /exports hfsplus.spl` –
+Ručně: `cargo build --release --target x86_64-pc-windows-msvc -p macfs-spl` a soubor
+`target\x86_64-pc-windows-msvc\release\macfs_spl.dll` přejmenuj na `macfs.spl`.
+MSVC runtime je slinkovaný staticky. Kontrola exportů: `dumpbin /exports macfs.spl` –
 musí být právě `SalamanderPluginEntry`, `SalamanderPluginGetReqVer`, `SalamanderPluginGetSDKVer`.
 
 **Jen x64.** Plugin musí mít stejnou bitovost jako Salamander. 32bitová verze by na x86 MSVC
@@ -82,13 +94,13 @@ vyžadovala `.def` soubor (stdcall dekorace názvů), což tu není připravené
 
 ## Instalace
 
-1. Zkopíruj `hfsplus.spl` do `<Salamander>\plugins\hfsplus\`.
+1. Zkopíruj `macfs.spl` do `<Salamander>\plugins\macfs\`.
 2. *Plugins → Plugins Manager → Add* a vyber soubor (v české lokalizaci stejné menu pod Moduly/Pluginy).
 3. Zkontroluj přípony v *Options → Configuration → Archives Associations in Panels*.
 
-## Skutečný disk nebo oddíl: soubor `.hfsdev`
+## Skutečný disk nebo oddíl: soubor `.macfsdev`
 
-Stejný formát jako u WCX verze. Textový soubor (např. `macdisk.hfsdev`):
+Stejný formát jako u WCX verze. Textový soubor (např. `macdisk.macfsdev`):
 
 ```ini
 device = \\.\PhysicalDrive2     # celý fyzický disk, oddíly se najdou podle GPT/APM/MBR

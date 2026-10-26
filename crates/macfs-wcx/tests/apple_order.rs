@@ -11,8 +11,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use hfsplus::testutil::HfsPlusImageBuilder;
-use hfsplus_wcx::archive::Archive;
-use hfsplus_wcx::ffi::{E_OK, PK_TEST};
+use macfs_wcx::archive::Archive;
+use macfs_wcx::ffi::{E_OK, PK_TEST};
 
 const PRIVATE: &str = "\0\0\0\0HFS+ Private Data";
 
@@ -59,7 +59,7 @@ fn apple_ordered(mut img: Vec<u8>) -> Vec<u8> {
 }
 
 fn temp_file(name: &str, data: &[u8]) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("hfsplus-spl-order-{}-{}", std::process::id(), name));
+    let d = std::env::temp_dir().join(format!("macfs-spl-order-{}-{}", std::process::id(), name));
     fs::create_dir_all(&d).unwrap();
     let f = d.join("vol.hfs");
     fs::write(&f, data).unwrap();

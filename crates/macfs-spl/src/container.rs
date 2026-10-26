@@ -28,6 +28,8 @@ pub const MAX_DISP_BYTES: usize = 250;
 pub enum OpenError {
     Io(io::Error),
     Config(String),
+    /// Recognised container that cannot be handled (encrypted DMG...).
+    Unsupported(String),
     NoVolume,
     Fs(VolumeError),
 }
@@ -36,8 +38,9 @@ impl fmt::Display for OpenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OpenError::Io(e) => write!(f, "cannot open the source: {e} (raw disks need Salamander run as administrator)"),
-            OpenError::Config(m) => write!(f, "invalid .hfsdev / .apfsdev file: {m}"),
-            OpenError::NoVolume => write!(f, "no HFS+/HFSX volume or APFS container found"),
+            OpenError::Config(m) => write!(f, "invalid .macfsdev / .hfsdev / .apfsdev file: {m}"),
+            OpenError::Unsupported(m) => write!(f, "{m}"),
+            OpenError::NoVolume => write!(f, "no HFS+/HFSX volume or APFS container found (also looked inside a DMG)"),
             OpenError::Fs(e) => write!(f, "damaged volume: {e}"),
         }
     }
@@ -55,7 +58,7 @@ pub struct Node {
 pub struct Item {
     pub vol: usize,
     /// Path of the item inside its volume (`/` separated, raw names).
-    pub hfs_path: String,
+    pub vol_path: String,
     pub disp: String,
     pub real: String,
     pub is_dir: bool,
@@ -68,7 +71,7 @@ pub struct Item {
 impl Item {
     /// The directory this item represents (only meaningful for `is_dir`).
     pub fn node(&self) -> Node {
-        Node { vol: Some(self.vol), path: self.hfs_path.clone() }
+        Node { vol: Some(self.vol), path: self.vol_path.clone() }
     }
 }
 
@@ -93,6 +96,7 @@ impl Container {
         let (src, parts) = detect::locate(path).map_err(|e| match e {
             LocateError::Io(e) => OpenError::Io(e),
             LocateError::Config(m) => OpenError::Config(m),
+            LocateError::Unsupported(m) => OpenError::Unsupported(m),
         })?;
         if parts.is_empty() {
             return Err(OpenError::NoVolume);
@@ -145,7 +149,7 @@ impl Container {
                 .enumerate()
                 .map(|(i, (disp, real))| Item {
                     vol: i,
-                    hfs_path: "/".into(),
+                    vol_path: "/".into(),
                     disp: disp.clone(),
                     real: real.clone(),
                     is_dir: true,
@@ -167,7 +171,7 @@ impl Container {
                 let is_dir = d.kind == NodeKind::Dir;
                 Item {
                     vol,
-                    hfs_path: if node.path == "/" { format!("/{}", d.name) } else { format!("{}/{}", node.path, d.name) },
+                    vol_path: if node.path == "/" { format!("/{}", d.name) } else { format!("{}/{}", node.path, d.name) },
                     disp: disp.unique(win::ansi_safe(&base, MAX_DISP_BYTES)),
                     real: real.unique(base),
                     is_dir,
@@ -184,7 +188,7 @@ impl Container {
         let base = util::sanitize_component(&n.name);
         Item {
             vol,
-            hfs_path: format!("/{}", n.name),
+            vol_path: format!("/{}", n.name),
             disp: win::ansi_safe(&base, MAX_DISP_BYTES),
             real: base,
             is_dir: false,
@@ -242,6 +246,6 @@ impl Container {
 
     /// Stream the contents of a file item (decmpfs-compressed files are decompressed).
     pub fn read_file(&mut self, item: &Item, out: &mut dyn Write) -> Result<u64, VolumeError> {
-        self.vols[item.vol].read_file_to(&item.hfs_path, out)
+        self.vols[item.vol].read_file_to(&item.vol_path, out)
     }
 }

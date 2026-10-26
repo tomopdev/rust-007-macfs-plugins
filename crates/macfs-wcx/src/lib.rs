@@ -1,4 +1,5 @@
-//! Total Commander WCX (packer) plugin for read-only access to HFS+/HFSX volumes and APFS containers.
+//! Total Commander WCX (packer) plugin for macOS file systems and archives: HFS+/HFSX volumes and APFS
+//! containers, also inside UDIF disk images (DMG). Everything is read-only.
 //!
 //! Built as a 64-bit DLL and renamed to `*.wcx64`. Only the Unicode (`...W`)
 //! entry points are implemented; the ANSI ones exist solely so Total Commander
@@ -9,7 +10,7 @@ pub mod archive;
 pub mod ffi;
 
 // sdílené moduly z macfs-core (zpřístupněné pod původními cestami)
-pub use macfs_core::{detect, source, util, volume};
+pub use macfs_core::{detect, source, udif, util, volume};
 
 use std::ffi::{c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -170,7 +171,7 @@ pub unsafe extern "system" fn CanYouHandleThisFileW(file_name: *const u16) -> c_
         }
         // SAFETY: NUL-terminated wide string.
         let path = util::wide_to_path(unsafe { wide_slice(file_name) });
-        if detect::is_hfsdev(&path) {
+        if detect::is_devlink(&path) {
             // Accept always: opening reports the real problem (admin rights, bad device...).
             return 1;
         }

@@ -1,0 +1,6 @@
+[plugininstall]
+description=MacFS: HFS+ / HFSX / APFS volumes and Apple DMG images (read-only): disk images, GPT/APM/MBR disks, raw partitions via .macfsdev
+type=wcx
+file=macfs_wcx.wcx
+defaultdir=MacFsWcx
+defaultextension=dmg

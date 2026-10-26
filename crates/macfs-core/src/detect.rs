@@ -1,11 +1,14 @@
 //! Locating HFS+/HFSX volumes and APFS containers inside a source: bare volume
 //! (HFS+ also inside the classic HFS wrapper), GPT, Apple Partition Map and MBR
-//! disks, and the `.hfsdev` / `.apfsdev` text files that point at raw devices.
+//! disks, UDIF (DMG) images (searched as the virtual disk they describe) and the
+//! `.macfsdev` / `.hfsdev` / `.apfsdev` text files that point at raw devices.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::source::DiskSource;
+use crate::udif::{self, ImageKind, UdifError, UdifImage};
 
 /// Which file system a [`Part`] holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,10 +202,10 @@ fn mbr(src: &mut DiskSource) -> Vec<Part> {
 }
 
 // ---------------------------------------------------------------------------
-// .hfsdev / .apfsdev link files
+// .macfsdev / .hfsdev / .apfsdev link files
 // ---------------------------------------------------------------------------
 
-/// Contents of a `.hfsdev` / `.apfsdev` file (same format, the extension is only a hint for the user).
+/// Contents of a `.macfsdev` / `.hfsdev` / `.apfsdev` file (same format, the extension is only a hint for the user).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DevSpec {
     pub device: PathBuf,
@@ -212,9 +215,11 @@ pub struct DevSpec {
     pub partition: Option<usize>,
 }
 
-/// `.hfsdev` or `.apfsdev` link file?
-pub fn is_hfsdev(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("hfsdev") || e.eq_ignore_ascii_case("apfsdev"))
+/// Link file to a device (`.macfsdev`; `.hfsdev` and `.apfsdev` are the older names of the same format)?
+pub fn is_devlink(path: &Path) -> bool {
+    path.extension().is_some_and(|e| {
+        e.eq_ignore_ascii_case("macfsdev") || e.eq_ignore_ascii_case("hfsdev") || e.eq_ignore_ascii_case("apfsdev")
+    })
 }
 
 fn parse_num(s: &str) -> Result<u64, String> {
@@ -241,7 +246,8 @@ pub fn decode_text(bytes: &[u8]) -> String {
 }
 
 /// Parse `key = value` lines (`#` / `;` comments): `device`, `offset`, `length`, `partition`.
-pub fn parse_hfsdev(text: &str) -> Result<DevSpec, String> {
+/// `device` may also name a disk image file (including a DMG).
+pub fn parse_devlink(text: &str) -> Result<DevSpec, String> {
     let mut spec = DevSpec::default();
     for raw in text.lines() {
         let line = raw.trim();
@@ -277,18 +283,39 @@ pub fn parse_hfsdev(text: &str) -> Result<DevSpec, String> {
 pub enum LocateError {
     Io(io::Error),
     Config(String),
+    /// A container that is recognised but cannot be handled (encrypted or sparse DMG, damaged UDIF...); the text says why.
+    Unsupported(String),
 }
 
-/// Open `path` (image file or `.hfsdev` / `.apfsdev` link) and find its HFS+ volumes / APFS containers.
+impl From<UdifError> for LocateError {
+    fn from(e: UdifError) -> Self {
+        match e {
+            UdifError::Io(e) => LocateError::Io(e),
+            e => LocateError::Unsupported(e.to_string()),
+        }
+    }
+}
+
+/// Open an image file, raw device or UDIF (DMG) image as a byte source. A UDIF container is
+/// presented as the virtual disk it describes; encrypted and sparse images are refused with an explanation.
+pub fn open_source(path: &Path) -> Result<DiskSource, LocateError> {
+    match udif::probe(path).map_err(LocateError::Io)? {
+        ImageKind::Plain => DiskSource::open(path).map_err(LocateError::Io),
+        ImageKind::Udif => Ok(DiskSource::open_udif(Arc::new(UdifImage::open(path)?)).map_err(LocateError::Io)?),
+        ImageKind::Unsupported(what) => Err(LocateError::Unsupported(format!("{what} is not supported"))),
+    }
+}
+
+/// Open `path` (image file, DMG or `.macfsdev` / `.hfsdev` / `.apfsdev` link) and find its HFS+ volumes / APFS containers.
 pub fn locate(path: &Path) -> Result<(DiskSource, Vec<Part>), LocateError> {
-    if !is_hfsdev(path) {
-        let mut src = DiskSource::open(path).map_err(LocateError::Io)?;
+    if !is_devlink(path) {
+        let mut src = open_source(path)?;
         let parts = find_volumes(&mut src);
         return Ok((src, parts));
     }
     let bytes = std::fs::read(path).map_err(LocateError::Io)?;
-    let spec = parse_hfsdev(&decode_text(&bytes)).map_err(LocateError::Config)?;
-    let mut src = DiskSource::open(&spec.device).map_err(LocateError::Io)?;
+    let spec = parse_devlink(&decode_text(&bytes)).map_err(LocateError::Config)?;
+    let mut src = open_source(&spec.device)?;
     let mut parts = match spec.offset {
         Some(off) => {
             let len = spec.length.unwrap_or_else(|| src.len().saturating_sub(off));
@@ -307,14 +334,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hfsdev_parsing() {
-        let s = parse_hfsdev("# comment\ndevice = \\\\.\\PhysicalDrive2\npartition=2\noffset = 0x10\n").unwrap();
+    fn devlink_parsing() {
+        let s = parse_devlink("# comment\ndevice = \\\\.\\PhysicalDrive2\npartition=2\noffset = 0x10\n").unwrap();
         assert_eq!(s.device, PathBuf::from("\\\\.\\PhysicalDrive2"));
         assert_eq!(s.partition, Some(2));
         assert_eq!(s.offset, Some(16));
-        assert!(parse_hfsdev("offset=1").is_err());
-        assert!(parse_hfsdev("device=x\nfoo=1").is_err());
-        assert!(is_hfsdev(Path::new("a.apfsdev")) && is_hfsdev(Path::new("a.HFSDEV")) && !is_hfsdev(Path::new("a.img")));
+        assert!(parse_devlink("offset=1").is_err());
+        assert!(parse_devlink("device=x\nfoo=1").is_err());
+        assert!(is_devlink(Path::new("a.apfsdev")) && is_devlink(Path::new("a.HFSDEV")) && is_devlink(Path::new("a.macfsdev")));
+        assert!(!is_devlink(Path::new("a.img")) && !is_devlink(Path::new("a.dmg")));
     }
 
     #[test]

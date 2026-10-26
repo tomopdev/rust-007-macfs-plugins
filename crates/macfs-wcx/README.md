@@ -1,4 +1,4 @@
-# hfsplus-wcx – HFS+/HFSX a APFS plugin pro Total Commander (64 bit, jen čtení)
+# macfs-wcx – HFS+/HFSX, APFS a DMG plugin pro Total Commander (64 bit, jen čtení)
 
 Součást workspace [macfs-plugins](../../README.md).
 
@@ -10,7 +10,7 @@ WCX plugin v Rustu (edition 2024) nad crate [`hfsplus` 0.4.0](https://crates.io/
 * otevře **obraz disku/oddílu** (`.hfs`, `.img`, `.raw`, `.iso` … cokoliv, co obsahuje HFS+/HFSX),
 * automaticky najde HFS+ oddíly na **GPT**, **Apple Partition Map** i **MBR** discích a v klasickém
   HFS wrapperu; jeden oddíl se zobrazí rovnou v kořeni, víc oddílů jako složky `Partition N - název`,
-* **skutečný oddíl/disk** přes malý textový soubor `*.hfsdev` (viz níže),
+* **skutečný oddíl/disk** přes malý textový soubor `*.macfsdev` (viz níže),
 * pojmenování: NFD → NFC, nepovolené znaky Windows (`< > : " | ? *`, řídicí znaky) → `_`,
   koncové tečky/mezery a rezervovaná jména (CON, NUL …) se ošetří, kolize jmen dostanou ` (2)`,
 * extrakce s průběhem a možností přerušení (nedokončený soubor se smaže), zachová datum změny,
@@ -19,7 +19,7 @@ WCX plugin v Rustu (edition 2024) nad crate [`hfsplus` 0.4.0](https://crates.io/
 
 ## APFS
 
-Kromě HFS+/HFSX plugin otevře i **kontejnery APFS** (obraz, GPT/APM/MBR disk, `.apfsdev`/`.hfsdev`).
+Kromě HFS+/HFSX plugin otevře i **kontejnery APFS** (obraz, GPT/APM/MBR disk, `.macfsdev`/`.apfsdev`/`.hfsdev`).
 Používá vendorovaný čistě rustový crate [`apfs` 0.4.1](https://crates.io/crates/apfs) (`vendor/apfs`,
 lokální úpravy v `vendor/apfs/PATCHES.md`: výběr svazku, příznaky svazku, detekce klonů).
 Kontejner s víc svazky (System, Data, Preboot, Recovery, VM …) se zobrazí jako složky
@@ -39,6 +39,19 @@ virtuálními textovými soubory, které se v seznamu chovají jako obyčejné s
 Syntetické APFS obrazy z testů vznikají podle specifikace Applu, **ne** z obrazu zapsaného macOS –
 první skutečný obraz vyzkoušej ručně (výpis, rozbalení, soubor s diakritikou).
 
+## DMG (UDIF)
+
+Obrazy Apple DMG se otevírají jako ostatní obrazy; plugin je pozná podle trailer „koly“ (ne podle přípony)
+a čte je jako jeden virtuální disk: oddíly leží na svých sektorech, takže GPT / Apple Partition Map uvnitř
+fungují stejně jako na skutečném disku (jeden svazek se zobrazí v kořeni, víc jako složky `Partition N - název`).
+Podporované bloky: raw, zlib (UDZO), bzip2 (UDBZ), LZFSE (ULFO), XZ (ULMO). Bloky se dekódují až při čtení, takže se
+velký DMG nerozbaluje celý a výpis je rychlý. Kontrolní součty (CRC32) se při prohlížení neověřují.
+
+* **Jen čtení.** DMG ani HFS+/APFS uvnitř se nezapisují; plugin nové kontejnery nevytváří.
+* **Nepodporované:** šifrovaný DMG (AES) a `.sparseimage` (plugin to při otevření oznámí), segmentované `.dmgpart`,
+  starý ADC a NDIF/Disk Copy. DMG bez UDIF trailer (holý obraz s příponou `.dmg`) se čte jako obyčejný obraz.
+* Obrazy `.sparsebundle` jsou složky, ne soubory; otevři v nich jednotlivé bands až po převodu na DMG/raw.
+
 ## Build
 
 Požadavky: Rust ≥ 1.97, toolchain `stable-x86_64-pc-windows-msvc`
@@ -47,19 +60,19 @@ a Visual Studio Build Tools (Desktop development with C++).
 Z kořene workspace:
 
 ```powershell
-.\build.ps1 -Plugin wcx           # testy + release build -> dist\hfsplus_wcx.wcx64 a dist\hfsplus_wcx.zip
+.\build.ps1 -Plugin wcx           # testy + release build -> dist\macfs_wcx.wcx64 a dist\macfs_wcx.zip
 .\build.ps1 -Plugin wcx -Native   # totéž s -C target-cpu=native (nepřenosné na starší CPU)
 ```
 
 Ručně:
 
 ```powershell
-cargo build --release --target x86_64-pc-windows-msvc -p hfsplus-wcx
-copy target\x86_64-pc-windows-msvc\release\hfsplus_wcx.dll hfsplus_wcx.wcx64
+cargo build --release --target x86_64-pc-windows-msvc -p macfs-wcx
+copy target\x86_64-pc-windows-msvc\release\macfs_wcx.dll macfs_wcx.wcx64
 ```
 
 Plugin musí mít příponu **`.wcx64`** (64bitový Total Commander načítá právě ty).
-Ověření exportů: `dumpbin /exports hfsplus_wcx.wcx64` – mají být `OpenArchiveW`, `ReadHeaderExW`,
+Ověření exportů: `dumpbin /exports macfs_wcx.wcx64` – mají být `OpenArchiveW`, `ReadHeaderExW`,
 `ProcessFileW`, `CloseArchive`, `SetChangeVolProcW`, `SetProcessDataProcW`, `CanYouHandleThisFileW`,
 `GetPackerCaps` (a ANSI zástupky `OpenArchive`, `ReadHeader`, `ProcessFile`).
 
@@ -67,20 +80,20 @@ Ověření exportů: `dumpbin /exports hfsplus_wcx.wcx64` – mají být `OpenAr
 
 **Ručně (nejjistější):**
 
-1. Zkopíruj `hfsplus_wcx.wcx64` do trvalé složky, např. `C:\Portable\TC\Plugins\HfsPlusWcx\`.
+1. Zkopíruj `macfs_wcx.wcx64` do trvalé složky, např. `C:\Portable\TC\Plugins\MacFsWcx\`.
 2. *Konfigurace → Nastavení → Zásuvné moduly (Plugins) → Konfigurovat packer pluginy (WCX)*.
-3. Do pole přípony zadej `hfsdev` (a podle potřeby další: `hfs`, `img`, `raw`), klikni
-   *Nový typ…* a vyber `hfsplus_wcx.wcx64`. Potvrď.
+3. Do pole přípony zadej `dmg` (a podle potřeby další: `macfsdev`, `hfs`, `img`, `raw`), klikni
+   *Nový typ…* a vyber `macfs_wcx.wcx64`. Potvrď.
 
-**Přes instalátor:** otevři `dist\hfsplus_wcx.zip` v TC (Enter) a potvrď instalaci. (Pokud by instalátor
+**Přes instalátor:** otevři `dist\macfs_wcx.zip` v TC (Enter) a potvrď instalaci. (Pokud by instalátor
 64bitový plugin nenašel, použij ruční postup.)
 
 Soubor se pak otevírá Enter / Ctrl+PgDn jako archiv.
 
-## Skutečný oddíl nebo disk: soubor `.hfsdev`
+## Skutečný oddíl nebo disk: soubor `.macfsdev`
 
 TC neumí předat jako „archiv“ cestu typu `\\.\PhysicalDrive2`, proto vytvoř textový soubor
-(např. `macdisk.hfsdev`) a otevři ho:
+(např. `macdisk.macfsdev`) a otevři ho:
 
 ```ini
 # celý fyzický disk – oddíly se najdou podle GPT/APM/MBR
@@ -106,8 +119,7 @@ partition = 2
 * **Hard linky** (typicky Time Machine) crate nevyhodnocuje: odkaz se zobrazí jako prázdný soubor, data
   jsou ve složce `____HFS+ Private Data` / `.HFS+ Private Directory Data_` jako `iNode…`.
 * Žurnál (journal) se nepřehrává – po neuklidněném odpojení může být obraz mírně nekonzistentní.
-* **CoreStorage/FileVault (HFS+), šifrované a komprimované DMG (UDIF)** nejsou podporované
-  (DMG nejdřív převeď na raw obraz).
+* **CoreStorage/FileVault (HFS+)** a šifrované DMG nejsou podporované (viz sekce DMG).
 * Položky, jejichž původní název na disku obsahuje znak `/` (starý Mac OS), nelze přes crate adresovat
   a extrakce selže.
 * Čas souboru v seznamu se převádí z UTC do lokálního času podle pravidel Windows.

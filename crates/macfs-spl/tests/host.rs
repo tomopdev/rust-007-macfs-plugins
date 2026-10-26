@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use apfs::testutil::ApfsImageBuilder;
 use hfsplus::testutil::HfsPlusImageBuilder;
-use hfsplus_spl::spl::*;
-use hfsplus_spl::win::{Answer, set_answer, take_messages};
-use hfsplus_spl::{SalamanderPluginEntry, SalamanderPluginGetReqVer, SalamanderPluginGetSDKVer};
+use macfs_spl::spl::*;
+use macfs_spl::win::{Answer, set_answer, take_messages};
+use macfs_spl::{SalamanderPluginEntry, SalamanderPluginGetReqVer, SalamanderPluginGetSDKVer};
 
 // ---------------------------------------------------------------------------
 // mock CSalamanderGeneralAbstract (only the slots the plugin uses)
@@ -137,7 +137,7 @@ static CONNECT_VTBL: ConnectVtbl = ConnectVtbl { AddCustomPacker: null(), AddCus
 
 /// Decode ANSI bytes the way Salamander's host would (emulated code page on Linux).
 fn ansi(b: &[u8]) -> String {
-    hfsplus_spl::win::from_ansi(b)
+    macfs_spl::win::from_ansi(b)
 }
 
 #[derive(Debug, Clone)]
@@ -339,7 +339,7 @@ fn enumerator(items: &[(&str, bool, u64)]) -> Box<EnumState> {
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn temp_dir() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("hfsplus-spl-test-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst)));
+    let d = std::env::temp_dir().join(format!("macfs-spl-test-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst)));
     fs::create_dir_all(&d).unwrap();
     d
 }
@@ -443,7 +443,7 @@ fn entry_points_and_connect() {
         let obj = unsafe { SalamanderPluginEntry(&mut *e as *mut MockEntry as *mut Entry) };
         assert!(!obj.is_null());
         assert_eq!(e.functions, FUNCTION_PANELARCHIVERVIEW);
-        assert_eq!(e.extensions, "hfs;apfs;hfsdev;apfsdev");
+        assert_eq!(e.extensions, "hfs;apfs;dmg;macfsdev;hfsdev;apfsdev");
         assert!(e.fs_name_null);
         assert!(e.name.contains("HFS+"));
 
@@ -451,10 +451,10 @@ fn entry_points_and_connect() {
             let pvt = &*(*(obj as *mut Obj<PluginVtbl>)).vtbl;
             let mut conn = MockConnect { vtbl: &CONNECT_VTBL, calls: vec![] };
             (pvt.Connect)(obj, null_mut(), &mut conn as *mut MockConnect as *mut Connect);
-            assert_eq!(conn.calls, vec![("hfs;apfs;hfsdev;apfsdev".to_string(), FALSE, FALSE)]);
+            assert_eq!(conn.calls, vec![("hfs;apfs;dmg;macfsdev;hfsdev;apfsdev".to_string(), FALSE, FALSE)]);
             assert_eq!(
                 (pvt.GetInterfaceForArchiver)(obj),
-                &hfsplus_spl::plugin::ARCHIVER_OBJ as *const Obj<ArchiverVtbl> as *mut c_void
+                &macfs_spl::plugin::ARCHIVER_OBJ as *const Obj<ArchiverVtbl> as *mut c_void
             );
             assert!((pvt.GetInterfaceForViewer)(obj).is_null());
             assert!((pvt.GetInterfaceForFS)(obj).is_null());
@@ -502,6 +502,35 @@ fn list_multi_volume_puts_dirs_before_their_files() {
         assert!(dir_pos < file_pos, "AddDir must precede AddFile into it");
     }
     assert_eq!(d.find("Partition 1 - one").attr, FILE_ATTRIBUTE_DIRECTORY);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn list_volume_inside_a_dmg() {
+    let dir = temp_dir();
+    let dmg = dir.join("vol.dmg");
+    let mut w = ::udif::DmgWriter::create(&dmg).unwrap().compression(::udif::CompressionMethod::Lzfse);
+    w.add_partition("disk image (Apple_HFSX : 0)", &flat_image()).unwrap();
+    w.finish().unwrap();
+
+    let (r, d) = list(&dmg);
+    assert_eq!(r, TRUE);
+    assert_eq!(d.find("hello.txt").size, 10);
+    assert_eq!(d.find("big.bin").size, 600_000);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn list_encrypted_dmg_says_so() {
+    let dir = temp_dir();
+    let dmg = dir.join("secret.dmg");
+    let mut data = b"encrcdsa".to_vec();
+    data.resize(8192, 1);
+    fs::write(&dmg, data).unwrap();
+    let _ = take_messages();
+    let (r, _d) = list(&dmg);
+    assert_eq!(r, FALSE);
+    assert!(take_messages().iter().any(|m| m.contains("encrypted")));
     fs::remove_dir_all(&dir).unwrap();
 }
 

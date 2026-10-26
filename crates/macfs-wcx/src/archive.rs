@@ -1,6 +1,6 @@
-//! Platform-neutral plugin core: opens volumes (HFS+/HFSX and APFS), walks them
-//! lazily one header at a time (what `ReadHeaderExW` needs) and extracts files
-//! (`ProcessFileW`).
+//! Platform-neutral plugin core: opens volumes (HFS+/HFSX and APFS, also inside UDIF/DMG
+//! images), walks them lazily one header at a time (what `ReadHeaderExW` needs) and extracts
+//! files (`ProcessFileW`). Read-only.
 
 use std::collections::VecDeque;
 use std::fs::{self, File};
@@ -18,7 +18,7 @@ use crate::volume::{self, MacVolume, Node, NodeKind, VolumeError};
 pub struct Entry {
     vol: usize,
     /// Path inside the volume (`/` separated, raw on-disk names).
-    hfs_path: String,
+    vol_path: String,
     /// Path shown to Total Commander (`\` separated, Windows-safe names).
     pub disp: String,
     pub is_dir: bool,
@@ -29,7 +29,7 @@ pub struct Entry {
 
 struct Job {
     vol: usize,
-    hfs_path: String,
+    vol_path: String,
     disp: String,
 }
 
@@ -37,9 +37,11 @@ struct Job {
 #[derive(Debug)]
 pub enum OpenError {
     Io(io::Error),
-    /// `.hfsdev` file is malformed.
+    /// Link file (`.macfsdev` / `.hfsdev` / `.apfsdev`) is malformed.
     Config(String),
-    /// Nothing that looks like HFS+/HFSX or APFS was found.
+    /// A container that is recognised but not supported (encrypted DMG...).
+    Unsupported(String),
+    /// Nothing that looks like HFS+/HFSX, APFS or a UDIF container was found.
     NoVolume,
     /// A volume was found but could not be parsed.
     Fs(VolumeError),
@@ -50,7 +52,7 @@ impl OpenError {
         match self {
             OpenError::Io(_) => ffi::E_EOPEN,
             OpenError::Config(_) => ffi::E_BAD_ARCHIVE,
-            OpenError::NoVolume => ffi::E_UNKNOWN_FORMAT,
+            OpenError::Unsupported(_) | OpenError::NoVolume => ffi::E_UNKNOWN_FORMAT,
             OpenError::Fs(e) if e.is_io() => ffi::E_EREAD,
             OpenError::Fs(_) => ffi::E_BAD_ARCHIVE,
         }
@@ -77,6 +79,7 @@ impl Archive {
         let (src, parts) = detect::locate(path).map_err(|e| match e {
             LocateError::Io(e) => OpenError::Io(e),
             LocateError::Config(m) => OpenError::Config(m),
+            LocateError::Unsupported(m) => OpenError::Unsupported(m),
         })?;
         if parts.is_empty() {
             return Err(OpenError::NoVolume);
@@ -90,7 +93,7 @@ impl Archive {
         let mut pending = VecDeque::new();
         let mut roots = Vec::new();
         if vols.len() == 1 {
-            work.push(Job { vol: 0, hfs_path: "/".into(), disp: String::new() });
+            work.push(Job { vol: 0, vol_path: "/".into(), disp: String::new() });
             roots.push(String::new());
         } else {
             // Several volumes: one top-level folder per volume.
@@ -98,7 +101,7 @@ impl Archive {
             for (i, label) in labels.iter().enumerate() {
                 let disp = names.unique(util::sanitize_component(label));
                 roots.push(disp.clone());
-                pending.push_back(Entry { vol: i, hfs_path: "/".into(), disp, is_dir: true, size: 0, mtime: None });
+                pending.push_back(Entry { vol: i, vol_path: "/".into(), disp, is_dir: true, size: 0, mtime: None });
             }
         }
 
@@ -121,7 +124,7 @@ impl Archive {
         loop {
             if let Some(e) = self.pending.pop_front() {
                 if e.is_dir {
-                    self.work.push(Job { vol: e.vol, hfs_path: e.hfs_path.clone(), disp: e.disp.clone() });
+                    self.work.push(Job { vol: e.vol, vol_path: e.vol_path.clone(), disp: e.disp.clone() });
                 }
                 self.current = Some(e.clone());
                 return Ok(Some(e));
@@ -134,7 +137,7 @@ impl Archive {
                 self.current = None;
                 return Ok(None);
             };
-            match self.vols[job.vol].list_directory(&job.hfs_path) {
+            match self.vols[job.vol].list_directory(&job.vol_path) {
                 Ok(list) => {
                     self.listed_any = true;
                     self.enqueue(&job, list);
@@ -155,8 +158,8 @@ impl Archive {
                 let shown = util::sanitize_component(&n.name);
                 let root = &self.roots[i];
                 self.pending.push_back(Entry {
-                    vol: i,
-                    hfs_path: format!("/{}", n.name),
+                        vol: i,
+                    vol_path: format!("/{}", n.name),
                     disp: if root.is_empty() { shown } else { format!("{root}\\{shown}") },
                     is_dir: false,
                     size: n.size,
@@ -176,10 +179,10 @@ impl Archive {
             let is_dir = d.kind == NodeKind::Dir;
             self.pending.push_back(Entry {
                 vol: job.vol,
-                hfs_path: if job.hfs_path == "/" {
+                vol_path: if job.vol_path == "/" {
                     format!("/{}", d.name)
                 } else {
-                    format!("{}/{}", job.hfs_path, d.name)
+                    format!("{}/{}", job.vol_path, d.name)
                 },
                 disp: if job.disp.is_empty() { shown } else { format!("{}\\{}", job.disp, shown) },
                 is_dir,
@@ -229,7 +232,7 @@ impl Archive {
             aborted: false,
             write_failed: false,
         };
-        let read = self.vols[entry.vol].read_file_to(&entry.hfs_path, &mut sink);
+        let read = self.vols[entry.vol].read_file_to(&entry.vol_path, &mut sink);
         let flushed = sink.flush();
 
         let code = match read {

@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use hfsplus::testutil::HfsPlusImageBuilder;
-use hfsplus_spl::container::Container;
+use macfs_spl::container::Container;
 
 const PRIVATE: &str = "\0\0\0\0HFS+ Private Data";
 
@@ -58,7 +58,7 @@ fn apple_ordered(mut img: Vec<u8>) -> Vec<u8> {
 }
 
 fn temp_file(name: &str, data: &[u8]) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("hfsplus-spl-order-{}-{}", std::process::id(), name));
+    let d = std::env::temp_dir().join(format!("macfs-spl-order-{}-{}", std::process::id(), name));
     fs::create_dir_all(&d).unwrap();
     let f = d.join("vol.hfs");
     fs::write(&f, data).unwrap();
@@ -86,12 +86,12 @@ fn private_data_name_is_found_in_apple_order() {
         let mut out = Vec::new();
         match c.read_file(it, &mut out) {
             Ok(_) => {}
-            Err(e) => failures.push(format!("{:?}: {e}", it.hfs_path)),
+            Err(e) => failures.push(format!("{:?}: {e}", it.vol_path)),
         }
     }
     assert!(failures.is_empty(), "lookups failed: {failures:#?}");
 
-    let private = items.iter().find(|i| i.hfs_path.contains("HFS+ Private Data")).unwrap();
+    let private = items.iter().find(|i| i.vol_path.contains("HFS+ Private Data")).unwrap();
     let mut out = Vec::new();
     c.read_file(private, &mut out).unwrap();
     assert_eq!(out, b"private");

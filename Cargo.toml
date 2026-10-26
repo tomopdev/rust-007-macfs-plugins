@@ -1,11 +1,11 @@
-# macfs-plugins – pluginy pro souborové manažery (Total Commander, Altap/Open Salamander) s read-only přístupem k souborovým systémům macOS. Aktuálně HFS+/HFSX, další přibudou.
+# macfs-plugins – pluginy pro souborové manažery (Total Commander, Altap/Open Salamander) pro souborové systémy a archivy macOS: HFS+/HFSX a APFS (jen čtení), obrazy DMG/UDIF (čtení i zápis na úrovni oddílů), další přibudou.
 [workspace]
 resolver = "3"
-members = ["crates/macfs-core", "crates/hfsplus-wcx", "crates/hfsplus-spl"]
+members = ["crates/macfs-core", "crates/macfs-wcx", "crates/macfs-spl"]
 exclude = ["vendor/hfsplus", "vendor/apfs"] # upstream cratey s lokálními patchi (viz PATCHES.md v adresářích), nejsou členy workspace
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
@@ -14,6 +14,12 @@ publish = false
 [workspace.dependencies]
 hfsplus = { path = "vendor/hfsplus", version = "=0.4.0" }
 apfs = { path = "vendor/apfs", version = "=0.4.1" }
+udif = "=0.4.2" # kontejner UDIF (DMG): čtení i zápis oddílů
+# dekodéry bloků UDIF pro líné čtení DMG (stejné verze jako v crate udif, aby se nelinkovaly dvakrát)
+flate2 = "1"
+bzip2 = "0.6"
+lzfse_rust = "0.2"
+lzma-rust2 = "0.21"
 unicode-normalization = "0.1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

@@ -1,6 +1,6 @@
 [package]
 name = "macfs-core"
-description = "Společné jádro pluginů macfs-plugins: zdroj dat (obraz/disk), detekce svazků, jména a časy"
+description = "Společné jádro pluginů macfs-plugins: zdroj dat (obraz/disk/DMG), detekce svazků, UDIF (čtení i zápis oddílů), jména a časy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,11 @@ publish.workspace = true
 apfs.workspace = true
 hfsplus.workspace = true
 unicode-normalization.workspace = true
+udif.workspace = true
+flate2.workspace = true
+bzip2.workspace = true
+lzfse_rust.workspace = true
+lzma-rust2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
