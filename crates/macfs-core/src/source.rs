@@ -13,6 +13,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::sparse::SparseDisk;
 use crate::udif::{UdifDisk, UdifImage};
 
 const CHUNK: u64 = 128 * 1024;
@@ -23,6 +24,8 @@ enum Backend {
     File(File),
     /// UDIF (DMG) image: the decompressed virtual disk, decoded block by block on demand.
     Udif(Box<UdifDisk>),
+    /// Sparse image / sparse bundle: bands put together on demand, missing bands read as zeros.
+    Sparse(Box<SparseDisk>),
 }
 
 pub struct DiskSource {
@@ -30,6 +33,8 @@ pub struct DiskSource {
     len: u64,
     tick: u64,
     cache: HashMap<u64, (Vec<u8>, u64)>,
+    /// File name of the opened source (without the folder), when it came from a file.
+    name: Option<String>,
 }
 
 impl DiskSource {
@@ -43,7 +48,7 @@ impl DiskSource {
         if len == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "source is empty or its size is unknown"));
         }
-        Ok(DiskSource { backend: Backend::File(file), len, tick: 0, cache: HashMap::new() })
+        Ok(DiskSource { backend: Backend::File(file), len, tick: 0, cache: HashMap::new(), name: None })
     }
 
     /// UDIF image as one virtual disk: all its partitions at their sector positions
@@ -54,19 +59,37 @@ impl DiskSource {
         if len == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "the disk image is empty"));
         }
-        Ok(DiskSource { backend: Backend::Udif(Box::new(disk)), len, tick: 0, cache: HashMap::new() })
+        Ok(DiskSource { backend: Backend::Udif(Box::new(disk)), len, tick: 0, cache: HashMap::new(), name: None })
+    }
+
+    /// Sparse image (`.sparseimage`) or sparse bundle as one virtual disk.
+    pub fn open_sparse(disk: SparseDisk) -> io::Result<Self> {
+        let len = disk.len();
+        if len == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "the disk image is empty"));
+        }
+        Ok(DiskSource { backend: Backend::Sparse(Box::new(disk)), len, tick: 0, cache: HashMap::new(), name: None })
     }
 
     /// The UDIF image behind this source (`None` for plain files and devices).
     pub fn udif(&self) -> Option<&Arc<UdifImage>> {
         match &self.backend {
             Backend::Udif(d) => Some(d.image()),
-            Backend::File(_) => None,
+            Backend::File(_) | Backend::Sparse(_) => None,
         }
     }
 
     pub fn len(&self) -> u64 {
         self.len
+    }
+
+    /// File name of the source (set by `detect::open_source`).
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.name = name;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -120,6 +143,7 @@ impl DiskSource {
                     got
                 }
                 Backend::Udif(disk) => disk.read_at(start, &mut data)?,
+                Backend::Sparse(disk) => disk.read_at(start, &mut data)?,
             };
             data.truncate(got);
             if self.cache.len() >= MAX_CHUNKS {

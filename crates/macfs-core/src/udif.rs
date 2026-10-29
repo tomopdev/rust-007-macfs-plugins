@@ -123,7 +123,6 @@ pub fn probe(path: &Path) -> io::Result<ImageKind> {
     }
     Ok(match &head[..got] {
         h if h.starts_with(b"encrcdsa") || h.starts_with(b"cdsaencr") => ImageKind::Unsupported("encrypted disk image (AES encrypted DMG)"),
-        h if h.starts_with(b"sprs") => ImageKind::Unsupported("sparse disk image (.sparseimage)"),
         _ => ImageKind::Plain,
     })
 }

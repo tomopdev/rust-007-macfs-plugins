@@ -139,6 +139,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "hfs-reader"
+version = "0.1.1"
+
+[[package]]
 name = "hfsplus"
 version = "0.4.0"
 dependencies = [
@@ -200,15 +204,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32c51f6215e459d29ee8b61c52074f545fe5518bcb351c590c6e98aec21a5a00"
 
 [[package]]
+name = "macfs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b21e884f35361ed7efb6c9e9d8857770a49462683678471f983175107f8d468e"
+
+[[package]]
 name = "macfs-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "apfs",
  "bzip2",
  "flate2",
+ "hfs-reader",
  "hfsplus",
  "lzfse_rust",
  "lzma-rust2",
+ "macfs",
  "macfs-core",
  "pbzx",
  "quick-xml",
@@ -220,10 +232,12 @@ dependencies = [
 
 [[package]]
 name = "macfs-spl"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "apfs",
+ "hfs-reader",
  "hfsplus",
+ "macfs",
  "macfs-core",
  "udif",
  "windows-sys",
@@ -231,10 +245,12 @@ dependencies = [
 
 [[package]]
 name = "macfs-wcx"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "apfs",
+ "hfs-reader",
  "hfsplus",
+ "macfs",
  "macfs-core",
  "udif",
  "windows-sys",

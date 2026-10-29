@@ -188,7 +188,7 @@ fn partition_list_and_positions() {
 #[test]
 fn unsupported_containers_are_named() {
     let dir = temp_dir();
-    for (magic, what) in [(&b"encrcdsa"[..], "encrypted"), (b"cdsaencr", "encrypted"), (b"sprs\0\0\0\0", "sparse")] {
+    for (magic, what) in [(&b"encrcdsa"[..], "encrypted"), (b"cdsaencr", "encrypted")] {
         let f = dir.join("x.dmg");
         let mut data = magic.to_vec();
         data.resize(4096, 0);

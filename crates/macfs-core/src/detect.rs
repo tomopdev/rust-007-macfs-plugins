@@ -1,6 +1,7 @@
-//! Locating HFS+/HFSX volumes and APFS containers inside a source: bare volume
-//! (HFS+ also inside the classic HFS wrapper), GPT, Apple Partition Map and MBR
+//! Locating HFS+/HFSX volumes, APFS containers and classic HFS / MFS volumes inside a source: bare volume
+//! (HFS+ also inside the classic HFS wrapper), Disk Copy 4.2 floppy images, GPT, Apple Partition Map and MBR
 //! disks, UDIF (DMG) images (searched as the virtual disk they describe) and the
+//! sparse images / sparse bundles (also searched as the virtual disk they describe) and the
 //! `.macfsdev` / `.hfsdev` / `.apfsdev` text files that point at raw devices.
 //! A source that is a XAR archive (macOS installer package, `.pkg`) is recognised as well.
 
@@ -8,7 +9,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::macfile;
 use crate::source::DiskSource;
+use crate::sparse::{self, SparseDisk, SparseError, SparseKind};
 use crate::udif::{self, ImageKind, UdifError, UdifImage};
 
 /// Which file system a [`Part`] holds.
@@ -20,6 +23,16 @@ pub enum FsKind {
     Apfs,
     /// macOS installer package (XAR archive, `.pkg`): not a volume, but shown like one.
     Pkg,
+    /// Classic HFS volume (Mac OS up to 9; not wrapping an HFS+ volume).
+    Hfs,
+    /// MFS volume (400K/800K floppy of the first Macintosh models).
+    Mfs,
+    /// AppleDouble / AppleSingle file (RFC 1740): a file with its forks and Finder metadata, shown like a small volume.
+    AppleDouble,
+    /// MacBinary I/II/III file.
+    MacBinary,
+    /// BinHex 4.0 file (`.hqx`).
+    BinHex,
 }
 
 /// One HFS+ volume or APFS container found in a source.
@@ -97,16 +110,52 @@ pub fn pkg_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option
         .then(|| Part { label: label.to_string(), start, len, kind: FsKind::Pkg })
 }
 
-/// HFS+/HFSX volume or APFS container at `start`.
-pub fn fs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option<Part> {
-    hfs_at(src, start, len, label).or_else(|| apfs_at(src, start, len, label))
+/// Does a classic HFS (not wrapping HFS+) or an MFS volume start at `start`? (master directory block at +1024:
+/// signature `BD` for HFS, `Ò×` = 0xD2D7 for MFS)
+pub fn classic_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option<Part> {
+    let mut m = [0u8; 130];
+    src.read_exact_at(start.checked_add(1024)?, &mut m).ok()?;
+    let kind = match be16(&m, 0) {
+        // allocation block size: non-zero multiple of 512; volume name at most 27 characters; no embedded HFS+ volume
+        0x4244 => {
+            let block = be32(&m, 20);
+            (block != 0 && block.is_multiple_of(512) && m[36] <= 27 && be16(&m, 124) != 0x482B).then_some(FsKind::Hfs)?
+        }
+        0xD2D7 => FsKind::Mfs,
+        _ => return None,
+    };
+    Some(Part { label: label.to_string(), start, len, kind })
 }
 
-/// All HFS+ volumes and APFS containers of a source. A bare volume (or a XAR installer package) at offset 0
-/// wins; otherwise GPT, then Apple Partition Map, then MBR.
+/// Floppy image in the Disk Copy 4.2 container (84 byte header, then the sector data; used for HFS and MFS floppies):
+/// returns the window of the sector data, which then is a bare volume.
+pub fn dc42_window(src: &mut DiskSource, total: u64) -> Option<(u64, u64)> {
+    let mut h = [0u8; 84];
+    src.read_exact_at(0, &mut h).ok()?;
+    if be16(&h, 82) != 0x0100 || h[0] > 63 {
+        return None;
+    }
+    let data = be32(&h, 64) as u64;
+    (data >= 2048 && data.is_multiple_of(512) && 84 + data <= total).then_some((84, data))
+}
+
+/// HFS+/HFSX volume, APFS container, classic HFS or MFS volume at `start`.
+pub fn fs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option<Part> {
+    hfs_at(src, start, len, label)
+        .or_else(|| apfs_at(src, start, len, label))
+        .or_else(|| classic_at(src, start, len, label))
+}
+
+/// All volumes of a source (HFS+, APFS, classic HFS, MFS). A bare volume (or a XAR installer package) at offset 0
+/// wins, then a Disk Copy 4.2 floppy; otherwise GPT, then Apple Partition Map, then MBR.
 pub fn find_volumes(src: &mut DiskSource) -> Vec<Part> {
     let total = src.len();
     if let Some(p) = fs_at(src, 0, total, "").or_else(|| pkg_at(src, 0, total, "")) {
+        return vec![p];
+    }
+    if let Some((start, len)) = dc42_window(src, total)
+        && let Some(p) = classic_at(src, start, len, "")
+    {
         return vec![p];
     }
     let mut parts = gpt(src);
@@ -116,7 +165,27 @@ pub fn find_volumes(src: &mut DiskSource) -> Vec<Part> {
     if parts.is_empty() {
         parts = mbr(src);
     }
+    if parts.is_empty() {
+        // last resort, the weakest signatures: a Macintosh file in a container
+        parts.extend(file_container_at(src, total));
+    }
     parts
+}
+
+/// AppleDouble / AppleSingle, BinHex 4.0 or MacBinary file that fills the whole source.
+pub fn file_container_at(src: &mut DiskSource, total: u64) -> Option<Part> {
+    let mut head = vec![0u8; 8192.min(total as usize)];
+    src.read_exact_at(0, &mut head).ok()?;
+    let kind = if macfile::is_apple_double(&head) {
+        FsKind::AppleDouble
+    } else if macfile::is_binhex(&head) {
+        FsKind::BinHex
+    } else if macfile::parse_macbinary(&head, total).is_some() {
+        FsKind::MacBinary
+    } else {
+        return None;
+    };
+    Some(Part { label: String::new(), start: 0, len: total, kind })
 }
 
 fn gpt(src: &mut DiskSource) -> Vec<Part> {
@@ -310,9 +379,29 @@ impl From<UdifError> for LocateError {
     }
 }
 
-/// Open an image file, raw device or UDIF (DMG) image as a byte source. A UDIF container is
-/// presented as the virtual disk it describes; encrypted and sparse images are refused with an explanation.
+impl From<SparseError> for LocateError {
+    fn from(e: SparseError) -> Self {
+        match e {
+            SparseError::Io(e) => LocateError::Io(e),
+            SparseError::Unsupported(m) => LocateError::Unsupported(m),
+        }
+    }
+}
+
+/// Open an image file, raw device, UDIF (DMG) image, sparse image or sparse bundle (the folder, or its `Info.plist`) as a
+/// byte source. A container is presented as the virtual disk it describes; encrypted images are refused with an explanation.
 pub fn open_source(path: &Path) -> Result<DiskSource, LocateError> {
+    let mut src = open_source_raw(path)?;
+    src.set_name(path.file_name().map(|n| n.to_string_lossy().into_owned()));
+    Ok(src)
+}
+
+fn open_source_raw(path: &Path) -> Result<DiskSource, LocateError> {
+    match sparse::probe(path) {
+        Some(SparseKind::Image) => return DiskSource::open_sparse(SparseDisk::open_image(path)?).map_err(LocateError::Io),
+        Some(SparseKind::Bundle(dir)) => return DiskSource::open_sparse(SparseDisk::open_bundle(&dir)?).map_err(LocateError::Io),
+        None => {}
+    }
     match udif::probe(path).map_err(LocateError::Io)? {
         ImageKind::Plain => DiskSource::open(path).map_err(LocateError::Io),
         ImageKind::Udif => Ok(DiskSource::open_udif(Arc::new(UdifImage::open(path)?)).map_err(LocateError::Io)?),

@@ -285,3 +285,187 @@ pub fn sample_pkg(big: &[u8]) -> Vec<u8> {
     x.file("Tool.pkg/Payload", &pbzx_xz(&payload, 4096));
     x.build()
 }
+
+// ---------------------------------------------------------------------------
+// sparse images
+// ---------------------------------------------------------------------------
+
+/// `.sparseimage` made of `raw` (a disk whose size is a multiple of 512): bands of `band_sectors` sectors that are all zeros are
+/// left out (holes), the stored bands are put into the file in reverse order so that the band map is really needed.
+/// A map that does not fit into 4096 bytes makes the header grow to a multiple of 4096 (the assumption of the reader).
+pub fn sparse_image(raw: &[u8], band_sectors: u32) -> Vec<u8> {
+    assert!(raw.len().is_multiple_of(512));
+    let band = band_sectors as usize * 512;
+    let nbands = raw.len().div_ceil(band);
+    let header = (64 + 4 * nbands).div_ceil(4096).max(1) * 4096;
+    let stored: Vec<usize> = (0..nbands).filter(|&b| raw[b * band..((b + 1) * band).min(raw.len())].iter().any(|&x| x != 0)).rev().collect();
+    let mut out = vec![0u8; header];
+    out[0..4].copy_from_slice(b"sprs");
+    out[4..8].copy_from_slice(&3u32.to_be_bytes());
+    out[8..12].copy_from_slice(&band_sectors.to_be_bytes());
+    out[12..16].copy_from_slice(&1u32.to_be_bytes());
+    out[16..20].copy_from_slice(&((raw.len() / 512) as u32).to_be_bytes());
+    for (slot, &b) in stored.iter().enumerate() {
+        out[64 + 4 * slot..68 + 4 * slot].copy_from_slice(&(b as u32 + 1).to_be_bytes());
+        let mut data = raw[b * band..((b + 1) * band).min(raw.len())].to_vec();
+        data.resize(band, 0);
+        out.extend_from_slice(&data);
+    }
+    out
+}
+
+/// Sparse bundle folder `dir` (created) made of `raw`: `Info.plist`, `Info.bckup`, empty `token`, `bands/<hex>` without the all-zero bands.
+pub fn write_sparsebundle(dir: &std::path::Path, raw: &[u8], band_bytes: usize) {
+    std::fs::create_dir_all(dir.join("bands")).unwrap();
+    let plist = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleInfoDictionaryVersion</key>\n\t<string>6.0</string>\n\t<key>band-size</key>\n\t<integer>{band_bytes}</integer>\n\t<key>bundle-backingstore-version</key>\n\t<integer>1</integer>\n\t<key>diskimage-bundle-type</key>\n\t<string>com.apple.diskimage.sparsebundle</string>\n\t<key>size</key>\n\t<integer>{}</integer>\n</dict>\n</plist>\n",
+        raw.len()
+    );
+    std::fs::write(dir.join("Info.plist"), &plist).unwrap();
+    std::fs::write(dir.join("Info.bckup"), &plist).unwrap();
+    std::fs::write(dir.join("token"), b"").unwrap();
+    for (b, chunk) in raw.chunks(band_bytes).enumerate() {
+        if chunk.iter().any(|&x| x != 0) {
+            std::fs::write(dir.join("bands").join(format!("{b:x}")), chunk).unwrap();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Macintosh file containers (AppleDouble, MacBinary, BinHex)
+// ---------------------------------------------------------------------------
+
+/// Mac time (seconds since 1904) used by the container builders: 2023-11-14 22:13:20.
+pub const MAC_TIME: u32 = 3_782_844_800;
+
+/// MacBinary III file: header with CRC and `mBIN`, forks and comment padded to 128 bytes.
+pub fn macbinary(name: &[u8], ftype: &[u8; 4], creator: &[u8; 4], flags: u16, data: &[u8], rsrc: &[u8], comment: &[u8]) -> Vec<u8> {
+    let mut h = [0u8; 128];
+    h[1] = name.len() as u8;
+    h[2..2 + name.len()].copy_from_slice(name);
+    h[65..69].copy_from_slice(ftype);
+    h[69..73].copy_from_slice(creator);
+    h[73] = (flags >> 8) as u8;
+    h[83..87].copy_from_slice(&(data.len() as u32).to_be_bytes());
+    h[87..91].copy_from_slice(&(rsrc.len() as u32).to_be_bytes());
+    h[91..95].copy_from_slice(&(MAC_TIME - 86_400).to_be_bytes());
+    h[95..99].copy_from_slice(&MAC_TIME.to_be_bytes());
+    h[99..101].copy_from_slice(&(comment.len() as u16).to_be_bytes());
+    h[101] = flags as u8;
+    h[102..106].copy_from_slice(b"mBIN");
+    h[122] = 130;
+    h[123] = 129;
+    let crc = crate::macfile::crc16(0, &h[..124]);
+    h[124..126].copy_from_slice(&crc.to_be_bytes());
+    let mut out = h.to_vec();
+    for part in [data, rsrc, comment] {
+        out.extend_from_slice(part);
+        out.resize(out.len().next_multiple_of(128), 0);
+    }
+    out
+}
+
+/// MacBinary I file (no CRC, zero filled reserved area).
+pub fn macbinary1(name: &[u8], ftype: &[u8; 4], creator: &[u8; 4], data: &[u8], rsrc: &[u8]) -> Vec<u8> {
+    let mut v = macbinary(name, ftype, creator, 0, data, rsrc, b"");
+    v[99..128].fill(0);
+    v
+}
+
+/// BinHex 4.0 text of a file (CRCs, run-length encoding of runs of equal bytes, 64 characters per line).
+pub fn binhex(name: &[u8], ftype: &[u8; 4], creator: &[u8; 4], flags: u16, data: &[u8], rsrc: &[u8]) -> String {
+    use crate::macfile::crc16;
+    let mut raw = vec![name.len() as u8];
+    raw.extend_from_slice(name);
+    raw.push(0);
+    raw.extend_from_slice(ftype);
+    raw.extend_from_slice(creator);
+    raw.extend_from_slice(&flags.to_be_bytes());
+    raw.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    raw.extend_from_slice(&(rsrc.len() as u32).to_be_bytes());
+    let c = crc16(0, &raw);
+    raw.extend_from_slice(&c.to_be_bytes());
+    for fork in [data, rsrc] {
+        raw.extend_from_slice(fork);
+        let c = crc16(0, fork);
+        raw.extend_from_slice(&c.to_be_bytes());
+    }
+    // run-length encoding: 0x90 is escaped as 0x90 0x00, a run of 4..=255 equal bytes becomes byte, 0x90, count
+    let mut enc = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let b = raw[i];
+        let mut n = 1;
+        while i + n < raw.len() && raw[i + n] == b && n < 255 {
+            n += 1;
+        }
+        if n >= 4 {
+            enc.push(b);
+            if b == 0x90 {
+                enc.push(0);
+            }
+            enc.extend_from_slice(&[0x90, n as u8]);
+            i += n;
+        } else {
+            enc.push(b);
+            if b == 0x90 {
+                enc.push(0);
+            }
+            i += 1;
+        }
+    }
+    const ALPHABET: &[u8; 64] = b"!\"#$%&'()*+,-012345689@ABCDEFGHIJKLMNPQRSTUVXYZ[`abcdefhijklmpqr";
+    let mut chars = String::new();
+    let (mut bits, mut nbits) = (0u32, 0);
+    for &b in &enc {
+        bits = bits << 8 | u32::from(b);
+        nbits += 8;
+        while nbits >= 6 {
+            nbits -= 6;
+            chars.push(ALPHABET[(bits >> nbits & 63) as usize] as char);
+        }
+        bits &= (1 << nbits) - 1;
+    }
+    if nbits > 0 {
+        chars.push(ALPHABET[(bits << (6 - nbits) & 63) as usize] as char);
+    }
+    let mut out = String::from("(This file must be converted with BinHex 4.0)\r\n\r\n:");
+    let all = chars;
+    for (k, line) in all.as_bytes().chunks(64).enumerate() {
+        if k > 0 {
+            out.push_str("\r\n");
+        }
+        out.push_str(std::str::from_utf8(line).unwrap());
+    }
+    out.push_str(":\r\n");
+    out
+}
+
+/// Entries of an AppleDouble / AppleSingle file: (entry id, data).
+pub fn apple_double(single: bool, entries: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let mut h = Vec::new();
+    h.extend_from_slice(&(if single { 0x0005_1600u32 } else { 0x0005_1607 }).to_be_bytes());
+    h.extend_from_slice(&0x0002_0000u32.to_be_bytes());
+    h.extend_from_slice(b"Mac OS X        ");
+    h.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+    let mut off = 26 + 12 * entries.len();
+    for (id, d) in entries {
+        h.extend_from_slice(&id.to_be_bytes());
+        h.extend_from_slice(&(off as u32).to_be_bytes());
+        h.extend_from_slice(&(d.len() as u32).to_be_bytes());
+        off += d.len();
+    }
+    for (_, d) in entries {
+        h.extend_from_slice(d);
+    }
+    h
+}
+
+/// Finder Info entry (32 bytes) as in a `._` file.
+pub fn finder_info(ftype: &[u8; 4], creator: &[u8; 4], flags: u16) -> Vec<u8> {
+    let mut f = vec![0u8; 32];
+    f[..4].copy_from_slice(ftype);
+    f[4..8].copy_from_slice(creator);
+    f[8..10].copy_from_slice(&flags.to_be_bytes());
+    f
+}

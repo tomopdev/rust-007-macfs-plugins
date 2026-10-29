@@ -22,3 +22,5 @@ macfs-core = { workspace = true, features = ["testutil"] }
 udif.workspace = true
 apfs = { workspace = true, features = ["testutil"] }
 hfsplus = { workspace = true, features = ["testutil"] }
+hfs-reader = { workspace = true, features = ["testutil"] }
+macfs.workspace = true

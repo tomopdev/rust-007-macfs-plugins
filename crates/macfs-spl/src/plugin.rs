@@ -14,11 +14,11 @@ use crate::spl::*;
 use crate::util;
 use crate::win::{self, Answer, Kind};
 
-pub const PLUGIN_NAME: &str = "MacFS (HFS+ / APFS / DMG / PKG)";
-const ABOUT_TEXT: &str = "MacFS: HFS+ / HFSX / APFS, Apple DMG (UDIF) and macOS installer package (PKG) read-only archiver plugin\n\nWritten in Rust on top of the hfsplus 0.4.0, \
-apfs 0.4.1 and xara crates (including decmpfs transparent compression).\n\nPKG: shows the XAR table of contents (!XAR-TOC.xml), the metadata of the components (!PKG-COMPONENTS.txt), the XAR entries as stored and, \
+pub const PLUGIN_NAME: &str = "MacFS (HFS+ / APFS / HFS / MFS / DMG / sparse / PKG)";
+const ABOUT_TEXT: &str = "MacFS: HFS+ / HFSX / APFS, Apple DMG (UDIF) and macOS installer package (PKG) read-only archiver plugin, also classic HFS and MFS (floppies, Disk Copy 4.2) sparse images (.sparseimage, .sparsebundle) and Macintosh file containers (AppleDouble RFC 1740, MacBinary, BinHex .hqx)\n\nWritten in Rust on top of the hfsplus 0.4.0, \
+apfs 0.4.1, hfs-reader 0.1.1 (GPL-3.0-or-later), macfs 0.2.0 and xara crates (including decmpfs transparent compression).\n\nPKG: shows the XAR table of contents (!XAR-TOC.xml), the metadata of the components (!PKG-COMPONENTS.txt), the XAR entries as stored and, \
 in the folder 'Installed Files', the files of the payload with a CPIO index (!CPIO-INDEX.txt).\n\nAPFS: encrypted volumes, snapshots and the clone \
-relationship are not supported yet; the plugin reports them in a '!APFS-NOTICE.txt' file inside the volume.\n\nOpens disk \
+relationship are not supported yet; the plugin reports them in a '!APFS-NOTICE.txt' file inside the volume.\n\nClassic HFS / MFS: names are MacRoman; a non-empty resource fork is shown as a second file 'name.rsrc'.\n\nOpens disk \
 images (also inside DMG), and raw partitions; use a *.macfsdev link file for physical disks (see README).";
 
 /// `CSalamanderGeneralAbstract*` received in `SalamanderPluginEntry`.
@@ -121,7 +121,7 @@ unsafe extern "system" fn p_connect(_this: *mut c_void, _parent: HWND, salamande
         }
         // Salamander recognises archives by extension only (no content detection).
         // SAFETY: valid host object; AddPanelArchiver is slot 2.
-        unsafe { ((*(*salamander).vtbl).AddPanelArchiver)(salamander, c"hfs;apfs;dmg;pkg;macfsdev;hfsdev;apfsdev".as_ptr(), FALSE, FALSE) }
+        unsafe { ((*(*salamander).vtbl).AddPanelArchiver)(salamander, c"hfs;apfs;dmg;pkg;dsk;dc42;image;hfv;mfs;sparseimage;sparsebundle;hqx;macbin;macfsdev;hfsdev;apfsdev".as_ptr(), FALSE, FALSE) }
     })
 }
 unsafe extern "system" fn p_release_plugin_data(_this: *mut c_void, _pd: *mut c_void) {}
@@ -671,13 +671,13 @@ pub unsafe fn plugin_entry(entry: *mut Entry) -> *mut c_void {
             GENERAL.store((vt.GetSalamanderGeneral)(entry), Ordering::Release);
             let ok = (vt.SetBasicPluginData)(
                 entry,
-                c"MacFS (HFS+ / APFS / DMG / PKG)".as_ptr(),
+                c"MacFS (HFS+ / APFS / HFS / MFS / DMG / sparse / PKG)".as_ptr(),
                 FUNCTION_PANELARCHIVERVIEW,
-                c"0.1.4".as_ptr(),
-                c"MIT licensed; hfsplus, apfs, udif and xara crates by Dil4rd".as_ptr(),
-                c"Opens HFS+/HFSX and APFS disk images, DMG images, partitions and macOS installer packages (PKG) (read-only), including decmpfs compressed files.".as_ptr(),
+                c"0.1.0".as_ptr(),
+                c"GPL-3.0-or-later (because of the hfs-reader crate); hfsplus, apfs, udif and xara crates by Dil4rd, macfs crate by John-K".as_ptr(),
+                c"Opens HFS+/HFSX, APFS, classic HFS and MFS disk images, DMG images, sparse images and sparse bundles, partitions and macOS installer packages (PKG) (read-only), including decmpfs compressed files.".as_ptr(),
                 c"MACFS".as_ptr(),
-                c"hfs;apfs;dmg;pkg;macfsdev;hfsdev;apfsdev".as_ptr(),
+                c"hfs;apfs;dmg;pkg;dsk;dc42;image;hfv;mfs;sparseimage;sparsebundle;hqx;macbin;macfsdev;hfsdev;apfsdev".as_ptr(),
                 null(),
             );
             if ok == 0 {

@@ -14,7 +14,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use apfs::testutil::ApfsImageBuilder;
+use hfs_reader::testutil::{HfsImageBuilder, ROOT as HFS_ROOT};
 use hfsplus::testutil::HfsPlusImageBuilder;
+use macfs::{ImageFormat, MfsVolume};
 use macfs_spl::spl::*;
 use macfs_spl::win::{Answer, set_answer, take_messages};
 use macfs_spl::{SalamanderPluginEntry, SalamanderPluginGetReqVer, SalamanderPluginGetSDKVer};
@@ -443,7 +445,7 @@ fn entry_points_and_connect() {
         let obj = unsafe { SalamanderPluginEntry(&mut *e as *mut MockEntry as *mut Entry) };
         assert!(!obj.is_null());
         assert_eq!(e.functions, FUNCTION_PANELARCHIVERVIEW);
-        assert_eq!(e.extensions, "hfs;apfs;dmg;pkg;macfsdev;hfsdev;apfsdev");
+        assert_eq!(e.extensions, "hfs;apfs;dmg;pkg;dsk;dc42;image;hfv;mfs;sparseimage;sparsebundle;hqx;macbin;macfsdev;hfsdev;apfsdev");
         assert!(e.fs_name_null);
         assert!(e.name.contains("HFS+"));
 
@@ -451,7 +453,7 @@ fn entry_points_and_connect() {
             let pvt = &*(*(obj as *mut Obj<PluginVtbl>)).vtbl;
             let mut conn = MockConnect { vtbl: &CONNECT_VTBL, calls: vec![] };
             (pvt.Connect)(obj, null_mut(), &mut conn as *mut MockConnect as *mut Connect);
-            assert_eq!(conn.calls, vec![("hfs;apfs;dmg;pkg;macfsdev;hfsdev;apfsdev".to_string(), FALSE, FALSE)]);
+            assert_eq!(conn.calls, vec![("hfs;apfs;dmg;pkg;dsk;dc42;image;hfv;mfs;sparseimage;sparsebundle;hqx;macbin;macfsdev;hfsdev;apfsdev".to_string(), FALSE, FALSE)]);
             assert_eq!(
                 (pvt.GetInterfaceForArchiver)(obj),
                 &macfs_spl::plugin::ARCHIVER_OBJ as *const Obj<ArchiverVtbl> as *mut c_void
@@ -802,6 +804,83 @@ fn apfs_single_volume_sits_in_the_root() {
     let (r, _) = list(&empty);
     assert_eq!(r, FALSE);
     assert!(take_messages().iter().any(|m| m.contains("no volume")));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// classic HFS and MFS
+// ---------------------------------------------------------------------------
+
+#[test]
+fn classic_hfs_and_mfs_images_list_and_unpack() {
+    let dir = temp_dir();
+
+    let mut b = HfsImageBuilder::new(b"Classic");
+    let folder = b.add_dir(HFS_ROOT, b"System Folder");
+    b.add_dir(HFS_ROOT, b"Empty");
+    b.add_file(HFS_ROOT, b"Read Me", b"hello classic", b"");
+    b.add_file(folder, b"Finder", b"data", b"resource fork");
+    let hfs = dir.join("classic.hfs");
+    fs::write(&hfs, b.build()).unwrap();
+
+    let (r, d) = list(&hfs);
+    assert_eq!(r, TRUE);
+    assert_eq!(d.find("Read Me").size, 13);
+    assert!(d.find("Empty").is_dir);
+    assert!(d.find("System Folder").is_dir);
+    assert_eq!(d.find("Finder").size, 4);
+    assert_eq!(d.find("Finder.rsrc").size, 13);
+
+    let target = dir.join("out");
+    fs::create_dir_all(&target).unwrap();
+    let mut ops = MockOps::new();
+    let items = [("System Folder", true, 0u64), ("System Folder\\Finder.rsrc", false, 13), ("Read Me", false, 13)];
+    assert_eq!(unpack(&hfs, &target, "", &items, &mut ops), TRUE);
+    assert_eq!(fs::read(target.join("Read Me")).unwrap(), b"hello classic");
+    assert_eq!(fs::read(target.join("System Folder").join("Finder.rsrc")).unwrap(), b"resource fork");
+
+    let mut v = MfsVolume::format(MfsVolume::FLOPPY_400K, "Mac 128", ImageFormat::DiskCopy42).unwrap();
+    v.add_file("Read Me", *b"TEXT", *b"MACA", b"hello from 1984", &[]).unwrap();
+    let mut out = std::io::Cursor::new(Vec::new());
+    v.save_to(&mut out).unwrap();
+    let mfs = dir.join("mac128.dsk");
+    fs::write(&mfs, out.into_inner()).unwrap();
+    let (r, d) = list(&mfs);
+    assert_eq!(r, TRUE);
+    assert_eq!(d.find("Read Me").size, 15);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// sparse images
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sparse_image_and_bundle_list_and_unpack() {
+    let dir = temp_dir();
+    let mut b = HfsImageBuilder::new(b"Sparse");
+    b.add_file(HFS_ROOT, b"Read Me", b"hello sparse", b"");
+    let mut raw = b.build();
+    raw.resize((raw.len() + 100_000).next_multiple_of(512), 0);
+
+    let img = dir.join("disk.sparseimage");
+    fs::write(&img, macfs_core::testutil::sparse_image(&raw, 16)).unwrap();
+    let (r, d) = list(&img);
+    assert_eq!(r, TRUE);
+    assert_eq!(d.find("Read Me").size, 12);
+
+    let bundle = dir.join("Backup.sparsebundle");
+    macfs_core::testutil::write_sparsebundle(&bundle, &raw, 32 * 1024);
+    // Salamander hands over a file: the bundle is opened through the Info.plist inside it
+    let (r, d) = list(&bundle.join("Info.plist"));
+    assert_eq!(r, TRUE);
+    assert_eq!(d.find("Read Me").size, 12);
+
+    let target = dir.join("out");
+    fs::create_dir_all(&target).unwrap();
+    let mut ops = MockOps::new();
+    assert_eq!(unpack(&img, &target, "", &[("Read Me", false, 12)], &mut ops), TRUE);
+    assert_eq!(fs::read(target.join("Read Me")).unwrap(), b"hello sparse");
     fs::remove_dir_all(&dir).unwrap();
 }
 

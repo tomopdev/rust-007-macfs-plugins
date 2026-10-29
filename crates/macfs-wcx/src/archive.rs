@@ -1,4 +1,4 @@
-//! Platform-neutral plugin core: opens volumes (HFS+/HFSX and APFS, also inside UDIF/DMG
+//! Platform-neutral plugin core: opens volumes (HFS+/HFSX, APFS, classic HFS and MFS, also inside UDIF/DMG
 //! images) and installer packages (PKG), walks them lazily one header at a time (what `ReadHeaderExW` needs) and extracts
 //! files (`ProcessFileW`). Read-only.
 
@@ -41,7 +41,7 @@ pub enum OpenError {
     Config(String),
     /// A container that is recognised but not supported (encrypted DMG...).
     Unsupported(String),
-    /// Nothing that looks like HFS+/HFSX, APFS, a UDIF container or an installer package (PKG) was found.
+    /// Nothing that looks like HFS+/HFSX, APFS, classic HFS, MFS, a UDIF container or an installer package (PKG) was found.
     NoVolume,
     /// A volume was found but could not be parsed.
     Fs(VolumeError),

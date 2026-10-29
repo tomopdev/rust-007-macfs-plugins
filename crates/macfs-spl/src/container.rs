@@ -40,7 +40,7 @@ impl fmt::Display for OpenError {
             OpenError::Io(e) => write!(f, "cannot open the source: {e} (raw disks need Salamander run as administrator)"),
             OpenError::Config(m) => write!(f, "invalid .macfsdev / .hfsdev / .apfsdev file: {m}"),
             OpenError::Unsupported(m) => write!(f, "{m}"),
-            OpenError::NoVolume => write!(f, "no HFS+/HFSX volume, APFS container or installer package (PKG) found (also looked inside a DMG)"),
+            OpenError::NoVolume => write!(f, "no HFS+/HFSX, classic HFS or MFS volume, APFS container or installer package (PKG) found (also looked inside a DMG, sparse image or sparse bundle)"),
             OpenError::Fs(e) => write!(f, "damaged volume: {e}"),
         }
     }

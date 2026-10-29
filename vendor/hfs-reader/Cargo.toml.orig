@@ -1,0 +1,9 @@
+[package]
+name = "hfs-reader"
+version = "0.1.1"
+edition = "2024"
+description = "A read-only parser for classic HFS (Hierarchical File System) disk images"
+repository = "https://github.com/feralfirmware/tailtalk"
+license = "GPL-3.0-or-later"
+
+[dependencies]

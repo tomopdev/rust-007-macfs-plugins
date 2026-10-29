@@ -1,5 +1,5 @@
 [plugininstall]
-description=MacFS: HFS+ / HFSX / APFS volumes, Apple DMG images and macOS PKG installer packages (read-only): disk images, GPT/APM/MBR disks, raw partitions via .macfsdev
+description=MacFS: HFS+ / HFSX / APFS / classic HFS / MFS volumes, Apple DMG images, sparse images / bundles, macOS PKG installer packages and AppleDouble / MacBinary / BinHex files (read-only): disk images, GPT/APM/MBR disks, raw partitions via .macfsdev
 type=wcx
 file=macfs_wcx.wcx
 defaultdir=MacFsWcx

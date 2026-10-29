@@ -17,6 +17,9 @@ if ($Native) { $env:RUSTFLAGS = '-C target-cpu=native' }
 rustup target add $target | Out-Null
 cargo test --workspace --release --target $target
 if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
+# vendor\hfs-reader není členem workspace (GPL, lokální patche), jeho testy se pouští zvlášť
+cargo test --release --target $target --manifest-path vendor\hfs-reader\Cargo.toml --features testutil
+if ($LASTEXITCODE -ne 0) { throw 'hfs-reader tests failed' }
 
 $packages = @()
 if ($Plugin -in 'all', 'wcx') { $packages += '-p', 'macfs-wcx' }

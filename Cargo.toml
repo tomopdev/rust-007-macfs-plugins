@@ -2,18 +2,22 @@
 [workspace]
 resolver = "3"
 members = ["crates/macfs-core", "crates/macfs-wcx", "crates/macfs-spl"]
-exclude = ["vendor/hfsplus", "vendor/apfs"] # upstream cratey s lokálními patchi (viz PATCHES.md v adresářích), nejsou členy workspace
+exclude = ["vendor/hfsplus", "vendor/apfs", "vendor/hfs-reader"] # upstream cratey s lokálními patchi (viz PATCHES.md v adresářích), nejsou členy workspace
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
-rust-version = "1.97"
-license = "MIT"
+rust-version = "1.99"
+authors = ["tomopdev <tomopdev@outlook.com>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/tomopdev/rust-007-macfs-plugins"
 publish = false
 
 [workspace.dependencies]
 hfsplus = { path = "vendor/hfsplus", version = "=0.4.0" }
 apfs = { path = "vendor/apfs", version = "=0.4.1" }
+hfs-reader = { path = "vendor/hfs-reader", version = "=0.1.1" } # klasický HFS (GPL-3.0-or-later, viz vendor/hfs-reader/PATCHES.md)
+macfs = "=0.2.0" # MFS (Macintosh File System, disketa 400K/800K), jen čtení
 udif = "=0.4.2" # kontejner UDIF (DMG): čtení i zápis oddílů
 # dekodéry bloků UDIF pro líné čtení DMG (stejné verze jako v crate udif, aby se nelinkovaly dvakrát)
 flate2 = "1"
@@ -32,6 +36,19 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Time",
 ] }
 macfs-core = { path = "crates/macfs-core" }
+
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+must_use_candidate = "allow" 
+missing_const_for_fn = "allow"
+similar_names = "allow"       
+option_if_let_else = "allow"  
+too_long_first_doc_paragraph = "allow" 
+too_many_arguments = "allow"
+
 
 [profile.release]
 opt-level = 3

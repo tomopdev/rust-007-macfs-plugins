@@ -1,4 +1,4 @@
-# macfs-wcx – HFS+/HFSX, APFS, DMG a PKG plugin pro Total Commander (64 bit, jen čtení)
+# macfs-wcx – HFS+/HFSX, APFS, klasický HFS, MFS, DMG, sparse image, PKG a kontejnery AppleDouble/MacBinary/BinHex plugin pro Total Commander (64 bit, jen čtení)
 
 Součást workspace [macfs-plugins](../../README.md).
 
@@ -48,9 +48,76 @@ Podporované bloky: raw, zlib (UDZO), bzip2 (UDBZ), LZFSE (ULFO), XZ (ULMO). Blo
 velký DMG nerozbaluje celý a výpis je rychlý. Kontrolní součty (CRC32) se při prohlížení neověřují.
 
 * **Jen čtení.** DMG ani HFS+/APFS uvnitř se nezapisují; plugin nové kontejnery nevytváří.
-* **Nepodporované:** šifrovaný DMG (AES) a `.sparseimage` (plugin to při otevření oznámí), segmentované `.dmgpart`,
+* **Nepodporované:** šifrovaný DMG (AES) (plugin to při otevření oznámí), segmentované `.dmgpart`,
   starý ADC a NDIF/Disk Copy. DMG bez UDIF trailer (holý obraz s příponou `.dmg`) se čte jako obyčejný obraz.
-* Obrazy `.sparsebundle` jsou složky, ne soubory; otevři v nich jednotlivé bands až po převodu na DMG/raw.
+* `.sparseimage` a `.sparsebundle` viz sekce níže.
+
+## Klasický HFS a MFS (disketky a disky System 1 – Mac OS 9)
+
+Plugin otevře i **klasické svazky Macintosh**, jen pro čtení: **HFS** (crate [`hfs-reader` 0.1.1](https://crates.io/crates/hfs-reader),
+vendorovaný s lokálními úpravami v `vendor/hfs-reader/PATCHES.md`) a **MFS** (400K/800K disketa prvních Maců, crate
+[`macfs` 0.2.0](https://crates.io/crates/macfs)). Poznají se podle obsahu (MDB na offsetu 1024), ne podle přípony:
+
+* holý obraz disku, obraz **Disk Copy 4.2** (`.dsk`, `.image`, `.dc42`; 84bajtová hlavička se přeskočí) a klasický HFS
+  oddíl na disku s **Apple Partition Map** (i uvnitř DMG). HFS wrapper kolem HFS+ je dál HFS+;
+* jména jsou **MacRoman** (diakritika a symboly se zobrazí správně), `/` ve jménu (na klasickém Macu legální) se zobrazí jako `:`;
+* **resource fork**: soubor s neprázdným resource forkem se zobrazí dvakrát – `Název` (data fork) a `Název.rsrc` (resource fork).
+  Starý software má většinu obsahu právě v resource forku, a data fork je pak prázdný. Typ a creator kód se nezobrazují;
+* prázdné složky se zobrazí, MFS je plochý (bez složek);
+* HFS se čte líně (v paměti je jen katalog, soubory se streamují), MFS svazek se načte celý (je malý, nad 64 MiB se odmítne).
+
+Omezení:
+
+* **Datumy** klasických svazků jsou místní čas Macu, který je zapsal, bez časové zóny. Plugin je zobrazí, jako by byly v UTC,
+  takže se v panelu mohou lišit o posun vaší časové zóny.
+* Jen čtení; poškozený katalog HFS se neotevře (chyba), poškozený soubor se rozbalí jen s chybou čtení. Obrazy NDIF a Disk Copy 6
+  (jiné než Disk Copy 4.2) plugin nezná.
+* **Licence:** crate `hfs-reader` je GPL-3.0-or-later, takže plugin, který ho obsahuje, je při šíření dalším lidem také GPL-3.0-or-later
+  (pro osobní použití je to jedno; viz `vendor/hfs-reader/PATCHES.md`).
+* Obrazy z testů vznikají podle *Inside Macintosh* (`hfs_reader::testutil`, formátování MFS dělá crate `macfs`), **ne** z reálného disku –
+  první skutečnou disketu nebo System disk vyzkoušej ručně.
+
+## Sparse image a sparse bundle (`.sparseimage`, `.sparsebundle`)
+
+Plugin čte i **sparse obrazy disků Apple**, jen pro čtení. Jsou to disky pevné velikosti rozdělené na pásma (bands);
+pásmo, které se neukládá, se čte jako nuly. Uvnitř bývá HFS+ nebo APFS (typicky na GPT) a plugin je najde jako u DMG.
+
+* **`.sparseimage`** (jeden soubor, signatura `sprs`): otevírá se přímo, pozná se podle obsahu.
+* **`.sparsebundle`** (složka s `Info.plist` a `bands\<hex>`, např. záloha Time Machine na síťovém disku): Total Commander
+  ani Salamander nepředají plugin složku, takže jedna z cest:
+  1. otevřít **`Info.plist`** uvnitř balíku (`.sparsebundle` je pro Windows obyčejná složka). Plugin pozná podle obsahu, že je
+     to sparse bundle; jiné `plist` soubory odmítne. V TC proto lze příponu `plist` pluginu bezpečně přiřadit,
+     do Salamanderu `plist` nepřiřazuj (hlásil by chybu u každého plist) a použij následující možnost;
+  2. soubor `.macfsdev` s `device = D:\Zalohy\Mac.sparsebundle` (cesta ke složce balíku).
+* **Šifrované** obrazy (AES, `encrcdsa` / `cdsaencr`, u balíku v souboru `token`) se pozná a odmítne s vysvětlením.
+* Obraz se čte líně, po pásmech; u balíku zůstává otevřených několik posledních souborů pásem. Time Machine zálohy mívají
+  hard linky, které plugin u HFS+ zobrazuje jako prázdné soubory (viz Omezení).
+* **Neověřeno na skutečných souborech:** formát `.sparseimage` je podle dokumentace libyal/libmodi (hlavička 4096 B, mapa pásem
+  od offsetu 64, pásma za hlavičkou). U obrazů s víc než 1008 pásmy předpokládám, že se hlavička zvětší na násobek 4096 B;
+  to jsem žádným skutečným souborem neověřil. Testy běží na syntetických obrazech, první skutečný `.sparseimage` / `.sparsebundle`
+  vyzkoušej ručně.
+
+## AppleDouble, MacBinary a BinHex (kontejnery souborů klasického Macu)
+
+Plugin otevře i jednotlivé soubory, ve kterých je uložen soubor z Macu s oběma forky a metadaty. Obsah se ukáže jako
+„archiv“ s několika položkami:
+
+| Formát | Poznání | Obsah |
+|---|---|---|
+| **AppleDouble** (RFC 1740, soubory `._název` z macOS) a **AppleSingle** | magic `00 05 16 07` / `00 05 16 00` | `!APPLEDOUBLE-INFO.txt` / `!APPLESINGLE-INFO.txt`, resource fork jako `<název>.rsrc`, u AppleSingle i datový fork |
+| **MacBinary I/II/III** (`.bin`, `.macbin`) | hlavička 128 bajtů (kontrola CRC u II/III) | `!MACBINARY-INFO.txt`, datový fork, `<název>.rsrc` |
+| **BinHex 4.0** (`.hqx`) | řádek „(This file must be converted with BinHex 4.0)“ | `!BINHEX-INFO.txt`, datový fork, `<název>.rsrc`; CRC všech částí se kontroluje a výsledek je v info souboru |
+
+`!…-INFO.txt` je čitelný výpis metadat: jméno, type/creator, příznaky Finderu (rozepsané), pozice ikony, data (vytvoření,
+změna, záloha, přístup), velikosti forků, komentář, černobílá ikona jako ASCII-art, tabulka entries (AppleDouble), ProDOS/MS-DOS/AFP
+informace a rozšířené atributy macOS (`com.apple.quarantine` apod.). Poškozená položka nebo špatné CRC nebrání otevření,
+jen se to v info souboru uvede.
+
+Poznámky: formát se pozná **podle obsahu**, přípona je jen pomůcka. Přípony `hqx` a `macbin` lze v Total Commanderu přiřadit
+pluginu; `bin` a `._*` ne (příliš obecné) – tyto soubory otevři klávesou **Ctrl+PgDn** na souboru, případně přes `.macfsdev` (`device = C:\cesta\._soubor`). Dekódování atributů
+(`ATTR`) vychází z dokumentace formátu a nebylo ověřeno na skutečných souborech z macOS; když se nepodaří, atributy se jen
+ohlásí jako nedekódované. Datum v MacBinary/BinHex je místní čas Macu bez časové zóny. Obraz disku zabalený do MacBinary
+se (zatím) jako disk neotevírá.
 
 ## PKG (instalační balíčky macOS)
 
@@ -108,7 +175,7 @@ Ověření exportů: `dumpbin /exports macfs_wcx.wcx64` – mají být `OpenArch
 
 1. Zkopíruj `macfs_wcx.wcx64` do trvalé složky, např. `C:\Portable\TC\Plugins\MacFsWcx\`.
 2. *Konfigurace → Nastavení → Zásuvné moduly (Plugins) → Konfigurovat packer pluginy (WCX)*.
-3. Do pole přípony zadej `dmg` (a podle potřeby další: `pkg`, `macfsdev`, `hfs`, `img`, `raw`), klikni
+3. Do pole přípony zadej `dmg` (a podle potřeby další: `pkg`, `macfsdev`, `hfs`, `img`, `raw`, `dsk`, `image`, `dc42`, `hfv`, `sparseimage`, `plist`), klikni
    *Nový typ…* a vyber `macfs_wcx.wcx64`. Potvrď.
 
 **Přes instalátor:** otevři `dist\macfs_wcx.zip` v TC (Enter) a potvrď instalaci. (Pokud by instalátor
@@ -146,8 +213,8 @@ partition = 2
   jsou ve složce `____HFS+ Private Data` / `.HFS+ Private Directory Data_` jako `iNode…`.
 * Žurnál (journal) se nepřehrává – po neuklidněném odpojení může být obraz mírně nekonzistentní.
 * **CoreStorage/FileVault (HFS+)** a šifrované DMG nejsou podporované (viz sekce DMG).
-* Položky, jejichž původní název na disku obsahuje znak `/` (starý Mac OS), nelze přes crate adresovat
-  a extrakce selže.
+* Položky HFS+, jejichž původní název na disku obsahuje znak `/` (starý Mac OS), nelze přes crate adresovat
+  a extrakce selže (klasický HFS a MFS to zvládají, viz sekce o klasických svazcích).
 * Čas souboru v seznamu se převádí z UTC do lokálního času podle pravidel Windows.
 
 ## Lokální oprava crate `hfsplus` (adresář `vendor/hfsplus`)

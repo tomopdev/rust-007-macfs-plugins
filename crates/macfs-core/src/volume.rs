@@ -1,4 +1,4 @@
-//! Uniform read-only view of one macOS volume, HFS+/HFSX or APFS (or an installer package, which is shown
+//! Uniform read-only view of one macOS volume, HFS+/HFSX, APFS, classic HFS or MFS (or an installer package, which is shown
 //! like a volume, see [`crate::pkg`]), so the plugins do not care which of them they are walking.
 //!
 //! APFS support is built on the pure-Rust `apfs` crate (vendored, see
@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 use apfs::{ApfsVolume, VolumeInfo};
 use hfsplus::HfsVolume;
 
+use crate::classic::ClassicVolume;
 use crate::detect::{FsKind, Part};
+use crate::macfile::ForkVolume;
 use crate::pkg::PkgVolume;
 use crate::source::{DiskSource, Slice};
 use crate::util;
@@ -106,6 +108,10 @@ enum Fs {
     Apfs(Box<ApfsVolume<Slice>>),
     /// Installer package (XAR) with its virtual files and the payload tree.
     Pkg(Box<PkgVolume>),
+    /// Classic HFS or MFS volume, see [`crate::classic`].
+    Classic(Box<ClassicVolume>),
+    /// A Macintosh file container (AppleDouble, MacBinary, BinHex), see [`crate::macfile`].
+    Forks(Box<ForkVolume>),
     /// Volume that cannot be read (encrypted, damaged...): only the notice is shown.
     Unreadable,
 }
@@ -237,6 +243,30 @@ impl MacVolume {
         }
     }
 
+    fn classic(v: ClassicVolume, kind: FsKind) -> Self {
+        MacVolume {
+            name: v.name().to_string(),
+            fs: Fs::Classic(Box::new(v)),
+            kind,
+            notice: None,
+            notice_listed: false,
+            clone_seen: false,
+            clones_listed: false,
+        }
+    }
+
+    fn forks(v: ForkVolume, kind: FsKind) -> Self {
+        MacVolume {
+            name: v.name().to_string(),
+            fs: Fs::Forks(Box::new(v)),
+            kind,
+            notice: None,
+            notice_listed: false,
+            clone_seen: false,
+            clones_listed: false,
+        }
+    }
+
     fn unreadable(name: String, text: String) -> Self {
         MacVolume {
             fs: Fs::Unreadable,
@@ -253,7 +283,7 @@ impl MacVolume {
         self.kind
     }
 
-    /// APFS volume name (empty for HFS+).
+    /// Volume name (APFS and classic volumes; empty for HFS+ and packages).
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -300,6 +330,8 @@ impl MacVolume {
                     .collect()
             }
             Fs::Pkg(v) => v.list_directory(path)?,
+            Fs::Classic(v) => v.list_directory(path)?,
+            Fs::Forks(v) => v.list_directory(path)?,
             Fs::Unreadable if is_root(path) => Vec::new(),
             Fs::Unreadable => return Err(VolumeError::NotFound(path.to_string())),
         };
@@ -344,6 +376,8 @@ impl MacVolume {
                 Ok(v.read_file_to(path, &mut w)?)
             }
             Fs::Pkg(v) => v.read_file_to(path, out),
+            Fs::Classic(v) => v.read_file_to(path, out),
+            Fs::Forks(v) => v.read_file_to(path, out),
             Fs::Unreadable => Err(VolumeError::NotFound(path.to_string())),
         }
     }
@@ -363,6 +397,16 @@ pub fn open_part(src: &Arc<Mutex<DiskSource>>, part: &Part) -> Result<Vec<MacVol
     match part.kind {
         FsKind::HfsPlus => Ok(vec![MacVolume::hfs(HfsVolume::open(slice())?)]),
         FsKind::Pkg => Ok(vec![MacVolume::pkg(PkgVolume::open(src.clone(), part.start, part.len)?)]),
+        FsKind::AppleDouble | FsKind::MacBinary | FsKind::BinHex => {
+            Ok(vec![MacVolume::forks(ForkVolume::open(src, part.kind, part.start, part.len)?, part.kind)])
+        }
+        FsKind::Hfs => Ok(vec![MacVolume::classic(ClassicVolume::open_hfs(slice())?, FsKind::Hfs)]),
+        FsKind::Mfs => {
+            if part.len > crate::classic::MAX_MFS_BYTES {
+                return Err(VolumeError::Format(format!("MFS volume of {} bytes is too big (the limit is {})", part.len, crate::classic::MAX_MFS_BYTES)));
+            }
+            Ok(vec![MacVolume::classic(ClassicVolume::open_mfs(slice())?, FsKind::Mfs)])
+        }
         FsKind::Apfs => {
             let slots = apfs::list_volumes(&mut slice())?;
             if slots.is_empty() {
@@ -407,6 +451,8 @@ pub fn open_all(src: &Arc<Mutex<DiskSource>>, parts: &[Part]) -> Result<Vec<Open
                 for (k, vol) in vols.into_iter().enumerate() {
                     let tag = match p.kind {
                         FsKind::HfsPlus | FsKind::Pkg => p.label.clone(),
+                        FsKind::Hfs | FsKind::Mfs if !p.label.is_empty() => p.label.clone(),
+                        FsKind::Hfs | FsKind::Mfs | FsKind::AppleDouble | FsKind::MacBinary | FsKind::BinHex => vol.name().to_string(),
                         FsKind::Apfs if !vol.name().is_empty() => vol.name().to_string(),
                         FsKind::Apfs => format!("Volume {}", k + 1),
                     };
